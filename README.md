@@ -71,6 +71,10 @@ Set these as environment variables before launching `claude`:
 | `CBM_BLOCKS`     | `1`           | `0` hides the 5h burn-rate/projection section (skips that account-wide call entirely) |
 | `CBM_BLOCKS_TTL` | `30`          | Seconds to cache the burn-rate call so frequent turns don't re-trigger the scan |
 | `CBM_GRAPH`      | `1`           | `0` hides the sparkline                              |
+| `CBM_BG`         | _(unset)_     | A 256-color index (e.g. `234`) paints an opaque background card behind the panel — useful in **transparent terminals**. Unset = solid high-contrast text, no fill. |
+
+The panel shows **every model used in the session** with its own cost, a cost-share
+bar, and token count (sessions that switched models show each one, not a `+N`).
 
 ## Performance
 

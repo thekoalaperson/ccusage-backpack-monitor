@@ -3,22 +3,21 @@
 
 Usage: render.py <session-id> [transcript-path]
 
-Designed to stay cheap: the watcher only calls this when the transcript actually
-changes, and within a render we keep the work bounded:
-  - `ccusage session -i <id>`  : the one per-change call (this session's cost)
-  - `ccusage blocks --active`  : account-wide 5h burn rate -> CACHED with a TTL
-                                 so frequent turns don't re-trigger the big scan
-  - sparkline                  : reads only the TAIL of the transcript, so cost
-                                 does not grow with session length
+Stays cheap (the watcher only calls this when the transcript changes):
+  - `ccusage session --json`  : ONE call -> totals + true per-model breakdown
+  - `ccusage blocks --active` : account-wide 5h burn rate -> CACHED with a TTL
+  - sparkline                 : reads only the TAIL of the transcript
 
 Env knobs:
   CBM_CCUSAGE      how to invoke ccusage (may include spaces)
-  CBM_BLOCKS       "0" hides the 5h burn-rate section (skips that call entirely)
+  CBM_BLOCKS       "0" hides the 5h burn-rate section (skips that call)
   CBM_BLOCKS_TTL   seconds to cache the blocks call (default 30)
   CBM_GRAPH        "0" hides the sparkline
-Exit 0 always; prints a "waiting" line if data isn't available yet.
+  CBM_BG           256-color index for an opaque background card (e.g. 234);
+                   unset = transparent-friendly (no background fill)
+Exit 0 always; prints a "waiting" line if data isn't ready yet.
 """
-import sys, os, json, subprocess, time, tempfile
+import sys, os, re, json, subprocess, time, tempfile, shutil
 
 sid = sys.argv[1] if len(sys.argv) > 1 else ""
 transcript = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -26,11 +25,31 @@ CCU = os.environ.get("CBM_CCUSAGE", "ccusage")
 SHOW_BLOCKS = os.environ.get("CBM_BLOCKS", "1") != "0"
 BLOCKS_TTL = float(os.environ.get("CBM_BLOCKS_TTL", "30"))
 SHOW_GRAPH = os.environ.get("CBM_GRAPH", "1") != "0"
-TAIL_BYTES = 262144  # 256 KB is plenty for the last few dozen turns
+BG = os.environ.get("CBM_BG", "").strip()
+TAIL_BYTES = 262144
 
+W = max(40, min(shutil.get_terminal_size((48, 24)).columns, 64))
+
+# ---- color (solid attributes; no DIM, which washes out on transparency) ---
 def a(code): return f"\033[{code}m"
-RESET, DIM, BOLD = a(0), a(2), a(1)
-GREEN, YELLOW, RED, CYAN, MAG, GREY, BLUE = (a(32), a(33), a(31), a(36), a(35), a(90), a(34))
+RESET, BOLD = a(0), a(1)
+GREEN, YELLOW, RED, CYAN, MAG, BLUE, WHITE, GREY = (
+    a(32), a(33), a(31), a(36), a(35), a(94), a(97), a(90))
+
+def model_color(name):
+    if "opus" in name: return MAG
+    if "sonnet" in name: return CYAN
+    if "haiku" in name: return GREEN
+    return WHITE
+
+ANSI = re.compile(r"\033\[[0-9;]*m")
+def vlen(s): return len(ANSI.sub("", s))
+
+def line(s=""):
+    if BG:
+        s = s + " " * max(0, W - vlen(s))
+        return f"\033[48;5;{BG}m{s}{RESET}"
+    return s
 
 def run_json(args):
     try:
@@ -40,7 +59,6 @@ def run_json(args):
         return None
 
 def cached_blocks(ttl):
-    """Account-wide; one cache shared across all sessions is correct here."""
     cache = os.path.join(tempfile.gettempdir(), "cbm-blocks-active.json")
     try:
         if os.path.exists(cache) and (time.time() - os.path.getmtime(cache)) < ttl:
@@ -57,8 +75,7 @@ def tail_lines(path, max_bytes=TAIL_BYTES):
     try:
         sz = os.path.getsize(path)
         with open(path, "rb") as f:
-            if sz > max_bytes:
-                f.seek(sz - max_bytes)
+            if sz > max_bytes: f.seek(sz - max_bytes)
             return f.read().decode("utf-8", "ignore").splitlines()
     except Exception:
         return []
@@ -66,16 +83,18 @@ def tail_lines(path, max_bytes=TAIL_BYTES):
 def human(n):
     n = float(n or 0)
     for unit, div in (("M", 1e6), ("K", 1e3)):
-        if n >= div:
-            return f"{n/div:.1f}{unit}"
+        if n >= div: return f"{n/div:.1f}{unit}"
     return str(int(n))
+
+def short_model(m):
+    return (m or "?").replace("claude-", "").replace("-20251001", "")
 
 def hm(iso):
     try: return iso[11:16]
     except Exception: return "?"
 
 BARS = "▁▂▃▄▅▆▇█"
-def spark(vals, width=34):
+def spark(vals, width=W-4):
     vals = vals[-width:]
     if not vals: return ""
     lo, hi = min(vals), max(vals)
@@ -88,53 +107,68 @@ def burn_color(cph):
     if cph < 10: return YELLOW
     return RED
 
-# ---- gather (the one mandatory per-change call) ---------------------------
-sess = run_json(["session", "-i", sid, "--json", "--offline"])
-entries = (sess or {}).get("entries") or []
-if not sess or not entries:
-    print(f"{GREY}waiting for session {sid[:8]} data...{RESET}")
+# ---- find this session in the one unfiltered call --------------------------
+data = run_json(["session", "--json", "--offline"])
+sess = None
+for s in (data or {}).get("session", []):
+    if s.get("period") == sid:
+        sess = s
+        break
+if not sess:
+    print(line(f"{GREY}waiting for session {sid[:8]} data...{RESET}"))
     sys.exit(0)
 
 tot_cost = sess.get("totalCost", 0)
 tot_tok = sess.get("totalTokens", 0)
-tin = sum(e.get("inputTokens", 0) for e in entries)
-tout = sum(e.get("outputTokens", 0) for e in entries)
-tcache = sum(e.get("cacheReadTokens", 0) + e.get("cacheCreationTokens", 0) for e in entries)
-models = []
-for e in entries:
-    m = (e.get("model") or "").replace("claude-", "").replace("-20251001", "")
-    if m and m not in models: models.append(m)
-model_label = (models[0] if models else "?") + (f" +{len(models)-1}" if len(models) > 1 else "")
+breakdowns = sorted(sess.get("modelBreakdowns", []),
+                    key=lambda b: b.get("cost", 0), reverse=True)
 
 # ---- render ---------------------------------------------------------------
-L = [f"{BOLD}{CYAN}ccusage{RESET}{DIM}  session {sid[:8]}{RESET}   {MAG}● {model_label}{RESET}",
-     "",
-     f"  {DIM}COST{RESET}  {BOLD}{GREEN}${tot_cost:,.2f}{RESET}     {DIM}TOKENS{RESET}  {BOLD}{human(tot_tok)}{RESET}",
-     f"  {DIM}in {human(tin)} · out {human(tout)} · cache {human(tcache)}{RESET}"]
+out = []
+out.append(line(f"{BOLD}{CYAN}ccusage{RESET}  {WHITE}{sid[:8]}{RESET}"))
+out.append(line(f"{BOLD}{GREEN}${tot_cost:,.2f}{RESET}  {BOLD}{human(tot_tok)} tokens{RESET}"))
+out.append(line())
+
+out.append(line(f"{BOLD}MODELS{RESET}"))
+for b in breakdowns:
+    name = short_model(b.get("modelName"))
+    col = model_color(name)
+    cost = b.get("cost", 0)
+    mtok = (b.get("inputTokens", 0) + b.get("outputTokens", 0)
+            + b.get("cacheReadTokens", 0) + b.get("cacheCreationTokens", 0))
+    share = (cost / tot_cost) if tot_cost else 0
+    barlen = 8
+    fill = int(round(share * barlen))
+    bar = "█" * fill + "·" * (barlen - fill)
+    out.append(line(f"  {col}●{RESET} {col}{name:<11}{RESET} {GREEN}${cost:>5.2f}{RESET} "
+                    f"{col}{bar}{RESET} {WHITE}{human(mtok):>5}{RESET}"))
 
 if SHOW_BLOCKS:
     b = ((cached_blocks(BLOCKS_TTL) or {}).get("blocks") or [None])[0]
     if b:
         br = (b.get("burnRate") or {}).get("costPerHour")
         col = burn_color(br)
-        rate = f"{col}🔥 ${br:,.2f}/hr{RESET}" if br is not None else ""
-        L += ["", f"  {DIM}5h BLOCK{RESET}  {YELLOW}${b.get('costUSD',0):,.2f}{RESET}   {rate}   {DIM}ends {hm(b.get('endTime',''))}{RESET}"]
+        rate = f"{col}🔥 ${br:,.1f}/hr{RESET}" if br is not None else ""
         proj = (b.get("projection") or {}).get("totalCost")
-        if proj is not None:
-            L.append(f"  {DIM}projected ~${proj:,.0f} this 5h window{RESET}")
+        ptxt = f"  {WHITE}~${proj:,.0f}{RESET}" if proj is not None else ""
+        out.append(line())
+        out.append(line(f"{BOLD}5h{RESET} {YELLOW}${b.get('costUSD',0):,.2f}{RESET}  {rate}"
+                        f"  {GREY}ends {hm(b.get('endTime',''))}{RESET}{ptxt}"))
 
 if SHOW_GRAPH and transcript and os.path.exists(transcript):
     outs = []
-    for line in tail_lines(transcript):
-        try: o = json.loads(line)
+    for ln in tail_lines(transcript):
+        try: o = json.loads(ln)
         except Exception: continue
         msg = o.get("message")
         u = msg.get("usage") if isinstance(msg, dict) else None
         if u and o.get("type") == "assistant":
             outs.append(u.get("output_tokens", 0))
     if outs:
-        L += ["", f"  {DIM}out tokens / turn  (last {min(len(outs),34)}){RESET}",
-              f"  {BLUE}{spark(outs)}{RESET}"]
+        out.append(line())
+        out.append(line(f"{BOLD}out/turn{RESET} {GREY}(last {min(len(outs), W-4)}){RESET}"))
+        out.append(line(f"{BLUE}{spark(outs)}{RESET}"))
 
-L += ["", f"  {GREY}live · updates on change · Ctrl-C to stop{RESET}"]
-print("\n".join(L))
+out.append(line())
+out.append(line(f"{GREY}live · updates on change · Ctrl-C to stop{RESET}"))
+print("\n".join(out))
