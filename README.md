@@ -5,7 +5,7 @@ change-driven [ccusage](https://github.com/ryoppippi/ccusage) readout** for the
 session you just started — and closes that pane automatically when the session
 ends. Think of it as a usage "backpack" your session carries while it runs.
 
-> **Status:** v0.5.0 — macOS + iTerm2 only. On any other terminal the hooks
+> **Status:** v0.5.1 — macOS + iTerm2 only. On any other terminal the hooks
 > no-op silently, so it's safe to install anywhere.
 
 ## Why
@@ -101,8 +101,10 @@ of the transcript, so a render stays ~0.1s regardless of session length.
 | panel  | `lib/render.py`     | —              | rich colored cost/burn-rate/sparkline view      |
 | close  | `bin/close-pane.sh` | `SessionEnd`   | look up the pane id, close that exact pane       |
 
-State (one tiny `<session-id>.pane` file per session) lives in the plugin's
-data dir and self-prunes after a day.
+State (one tiny `<session-id>.pane` file per session) lives in
+`~/.local/state/ccusage-backpack-monitor` and self-prunes after a day. (A fixed
+path on purpose: the hooks and the slash command must agree on it, so the close
+hook can find a pane the command opened.)
 
 ## Roadmap
 

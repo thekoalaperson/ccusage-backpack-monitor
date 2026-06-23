@@ -19,10 +19,13 @@ cbm_fix_path() {
   export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.bun/bin:$HOME/.local/bin:$PATH"
 }
 
-# Directory for tiny pane-id state files. Prefers the plugin's persistent data
-# dir (set by Claude Code); falls back to an XDG-style path for standalone use.
+# Directory for tiny pane-id state files. MUST be identical across contexts:
+# the SessionStart/SessionEnd hooks and the /ccusage-monitor command all read it.
+# We deliberately do NOT use $CLAUDE_PLUGIN_DATA — it's set in hook context but
+# not in slash-command (!-bash) context, which would split the open and close
+# sides into different dirs so the close hook couldn't find the command's pane.
 cbm_state_dir() {
-  local d="${CLAUDE_PLUGIN_DATA:-${XDG_STATE_HOME:-$HOME/.local/state}/ccusage-backpack-monitor}"
+  local d="${XDG_STATE_HOME:-$HOME/.local/state}/ccusage-backpack-monitor"
   mkdir -p "$d" 2>/dev/null
   printf '%s' "$d"
 }
