@@ -39,3 +39,72 @@ cbm_is_iterm() {
 cbm_json_field() {
   sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
+
+# Is the iTerm pane with id $1 currently alive?
+cbm_pane_alive() {
+  [ -n "$1" ] || return 1
+  local r
+  r="$(/usr/bin/osascript 2>/dev/null <<OSA
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (id of s) is "$1" then return "1"
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "0"
+OSA
+)"
+  [ "$r" = "1" ]
+}
+
+# Open the monitor pane for session <sid> (transcript <trans>, may be empty) and
+# stash the new pane id. Idempotent: no-op if a live pane already exists for it.
+# Shared by the SessionStart hook and the /ccusage-monitor command.
+cbm_open_pane() {
+  local sid="$1" trans="$2"
+  [ -z "$sid" ] && return 0
+  cbm_is_iterm || return 0
+
+  local libdir watcher state
+  libdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  watcher="$libdir/../bin/watch.sh"
+  state="$(cbm_state_dir)"
+
+  # Self-pruning: drop stale pane-id files orphaned by crashes/reboots (>1 day).
+  find "$state" -name '*.pane' -mtime +1 -delete 2>/dev/null
+
+  # Idempotency: if a live pane already exists for this session, don't reopen.
+  local prev="$state/$sid.pane"
+  if [ -f "$prev" ] && cbm_pane_alive "$(cat "$prev" 2>/dev/null)"; then
+    return 0
+  fi
+
+  local poll="${CBM_POLL:-3}" split="${CBM_SPLIT:-vertically}"
+  case "$poll" in ''|*[!0-9]*) poll=3 ;; esac
+  [ "$poll" -lt 1 ] && poll=1
+  case "$split" in vertically|horizontally) ;; *) split=vertically ;; esac
+
+  # Single-quote each arg for the shell (handles spaces/metachars), then escape
+  # the whole string for the AppleScript double-quoted literal (\ and ").
+  local cmd osa_cmd paneid
+  cmd="$watcher $(cbm_shq "$sid") $(cbm_shq "$trans") $(cbm_shq "$poll")"
+  osa_cmd="$(printf '%s' "$cmd" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+
+  paneid="$(/usr/bin/osascript 2>/dev/null <<OSA
+tell application "iTerm2"
+  tell current session of current window
+    set newSession to (split $split with same profile command "$osa_cmd")
+  end tell
+  id of newSession
+end tell
+OSA
+)"
+
+  [ -n "$paneid" ] && printf '%s' "$paneid" > "$state/$sid.pane"
+}
+
+# Single-quote a string for safe use as one shell word.
+cbm_shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }

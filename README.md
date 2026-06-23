@@ -5,7 +5,7 @@ change-driven [ccusage](https://github.com/ryoppippi/ccusage) readout** for the
 session you just started — and closes that pane automatically when the session
 ends. Think of it as a usage "backpack" your session carries while it runs.
 
-> **Status:** v0.4.0 — macOS + iTerm2 only. On any other terminal the hooks
+> **Status:** v0.5.0 — macOS + iTerm2 only. On any other terminal the hooks
 > no-op silently, so it's safe to install anywhere.
 
 ## Why
@@ -60,6 +60,12 @@ Point the marketplace at a local checkout instead of GitHub:
 /plugin install ccusage-backpack-monitor@ccusage-backpack-monitor
 ```
 </details>
+
+## Commands
+
+`/ccusage-backpack-monitor:ccusage-monitor` — open the monitor pane for the
+**current** session on demand (handy if it isn't open, or you closed it). Plugin
+commands are namespaced, so type `/ccusage` and let autocomplete finish it.
 
 ## Configuration
 
