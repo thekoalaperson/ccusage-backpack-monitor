@@ -17,10 +17,26 @@ only when something actually changed, so it's near-live yet idle-cheap.
 
 ## Requirements
 
-- macOS with **iTerm2**
-- [`ccusage`](https://github.com/ryoppippi/ccusage) (`brew install ccusage`, or it
-  falls back to `npx -y ccusage@latest`)
+- **macOS** with **iTerm2** (the pane is opened via iTerm2's AppleScript).
+- [`ccusage`](https://github.com/ryoppippi/ccusage) — `brew install ccusage`
+  (recommended), or it falls back to `npx -y ccusage@latest` if Node is present.
+- **`python3`** for the rich colored panel + sparkline. On a fresh macOS this
+  lives at `/usr/bin/python3` and may prompt to install the Xcode Command Line
+  Tools the first time. If `python3` is missing, the pane **degrades gracefully**
+  to plain `ccusage session` text output — it does not error.
 - One-time: allow the macOS Automation prompt ("iTerm wants to control iTerm").
+
+### Where it works (and where it no-ops)
+
+| Scenario | Behaviour |
+|---|---|
+| macOS + iTerm2 + ccusage + python3 | Full rich panel (cost, burn rate, sparkline) |
+| macOS + iTerm2, no python3        | Plain `ccusage` text fallback, still live    |
+| Any non-iTerm terminal            | Hooks **no-op silently** (safe to leave installed) |
+| Linux / Windows                   | No-op (no iTerm2 AppleScript); not yet supported |
+
+No `watch`, `jq`, or charting libraries are required — the only hard runtime
+dependencies are `ccusage` and (for the rich view) the stock `python3`.
 
 ## Install
 
@@ -48,17 +64,30 @@ Point the marketplace at a local checkout instead of GitHub:
 
 Set these as environment variables before launching `claude`:
 
-| Var         | Default       | Meaning                                            |
-|-------------|---------------|----------------------------------------------------|
-| `CBM_POLL`  | `3`           | Seconds between cheap file-change checks            |
-| `CBM_SPLIT` | `vertically`  | `vertically` (side-by-side) or `horizontally`      |
+| Var              | Default       | Meaning                                              |
+|------------------|---------------|------------------------------------------------------|
+| `CBM_POLL`       | `3`           | Seconds between cheap file-change checks              |
+| `CBM_SPLIT`      | `vertically`  | `vertically` (side-by-side) or `horizontally`        |
+| `CBM_BLOCKS`     | `1`           | `0` hides the 5h burn-rate/projection section (skips that account-wide call entirely) |
+| `CBM_BLOCKS_TTL` | `30`          | Seconds to cache the burn-rate call so frequent turns don't re-trigger the scan |
+| `CBM_GRAPH`      | `1`           | `0` hides the sparkline                              |
+
+## Performance
+
+The watcher is **change-driven, not interval-driven**. When idle it only does a
+cheap `stat` on this session's transcript every `CBM_POLL` seconds — no `ccusage`
+process, no parsing. It renders only when the transcript actually changes, so
+cost is proportional to real activity, not wall-clock time. The account-wide
+burn-rate call is cached (`CBM_BLOCKS_TTL`), and the sparkline reads only the tail
+of the transcript, so a render stays ~0.1s regardless of session length.
 
 ## How it works
 
-| Phase  | File               | Hook           | Action                                          |
-|--------|--------------------|----------------|-------------------------------------------------|
+| Phase  | File                | Hook           | Action                                          |
+|--------|---------------------|----------------|-------------------------------------------------|
 | open   | `bin/open-pane.sh`  | `SessionStart` | split pane, run watcher, stash the pane id      |
-| render | `bin/watch.sh`      | —              | stat transcript; run ccusage only on change     |
+| render | `bin/watch.sh`      | —              | stat transcript; on change, draw the panel      |
+| panel  | `lib/render.py`     | —              | rich colored cost/burn-rate/sparkline view      |
 | close  | `bin/close-pane.sh` | `SessionEnd`   | look up the pane id, close that exact pane       |
 
 State (one tiny `<session-id>.pane` file per session) lives in the plugin's
@@ -66,9 +95,9 @@ data dir and self-prunes after a day.
 
 ## Roadmap
 
-- Lightweight in-pane temporal visualizations (Unicode sparklines, no deps)
 - Support for more terminals (tmux, WezTerm, kitty, Ghostty)
 - A companion skill/command for on-demand usage summaries
+- Optional context-window % and per-model cost split in the panel
 
 ## License
 

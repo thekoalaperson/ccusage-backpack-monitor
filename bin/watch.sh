@@ -30,6 +30,16 @@ locate() {
   transcript="$(find "$HOME/.claude/projects" -name "$sid.jsonl" 2>/dev/null | head -1)"
 }
 
+# Rich python panel when available; otherwise fall back to plain ccusage output.
+render() {
+  if [ -x /usr/bin/python3 ] && [ -f "$here/../lib/render.py" ]; then
+    CBM_CCUSAGE="$ccu" /usr/bin/python3 "$here/../lib/render.py" "$sid" "$transcript" 2>/dev/null && return
+  fi
+  eval "$ccu session -i $sid --offline" 2>&1
+  gray ""
+  gray "session ${sid:0:8}  |  live (updates on change)  |  Ctrl-C to stop"
+}
+
 last=""
 while true; do
   locate
@@ -40,14 +50,12 @@ while true; do
     continue
   fi
 
-  # Cheap change signature: mtime-size (BSD stat). No ccusage call unless changed.
+  # Cheap change signature: mtime-size (BSD stat). No render unless changed.
   sig="$(stat -f '%m-%z' "$transcript" 2>/dev/null)"
   if [ "$sig" != "$last" ]; then
     last="$sig"
     clear
-    eval "$ccu session -i $sid --offline" 2>&1
-    gray ""
-    gray "session ${sid:0:8}  |  live (updates on change)  |  Ctrl-C to stop"
+    render
   fi
   sleep "$poll"
 done
