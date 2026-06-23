@@ -61,12 +61,13 @@ OSA
 }
 
 # Open the monitor pane for session <sid> (transcript <trans>, may be empty) and
-# stash the new pane id. Idempotent: no-op if a live pane already exists for it.
-# Shared by the SessionStart hook and the /ccusage-monitor command.
+# stash the new pane id. Idempotent. Shared by the SessionStart hook and the
+# /ccusage-monitor command. Returns: 0 opened, 2 already open, 1 not opened —
+# so callers need no extra cbm_pane_alive queries to report the outcome.
 cbm_open_pane() {
   local sid="$1" trans="$2"
-  [ -z "$sid" ] && return 0
-  cbm_is_iterm || return 0
+  [ -z "$sid" ] && return 1
+  cbm_is_iterm || return 1
 
   local libdir watcher state
   libdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,7 +80,7 @@ cbm_open_pane() {
   # Idempotency: if a live pane already exists for this session, don't reopen.
   local prev="$state/$sid.pane"
   if [ -f "$prev" ] && cbm_pane_alive "$(cat "$prev" 2>/dev/null)"; then
-    return 0
+    return 2
   fi
 
   local poll="${CBM_POLL:-3}" split="${CBM_SPLIT:-vertically}"
@@ -103,7 +104,9 @@ end tell
 OSA
 )"
 
-  [ -n "$paneid" ] && printf '%s' "$paneid" > "$state/$sid.pane"
+  [ -z "$paneid" ] && return 1
+  printf '%s' "$paneid" > "$state/$sid.pane"
+  return 0
 }
 
 # Single-quote a string for safe use as one shell word.

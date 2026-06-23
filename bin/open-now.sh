@@ -32,16 +32,12 @@ if [ -z "$sid" ]; then
   exit 0
 fi
 
-state="$(cbm_state_dir)"
-if [ -f "$state/$sid.pane" ] && cbm_pane_alive "$(cat "$state/$sid.pane" 2>/dev/null)"; then
-  echo "ccusage monitor already open for session ${sid:0:8}."
-  exit 0
-fi
-
+# cbm_open_pane is idempotent and reports the outcome via its exit code, so we
+# need no separate pane-alive queries here.
 cbm_open_pane "$sid" "$trans"
-if [ -f "$state/$sid.pane" ] && cbm_pane_alive "$(cat "$state/$sid.pane" 2>/dev/null)"; then
-  echo "✅ Opened ccusage monitor for session ${sid:0:8}."
-else
-  echo "Could not open the pane — is iTerm Automation permission granted?"
-fi
+case $? in
+  0) echo "✅ Opened ccusage monitor for session ${sid:0:8}." ;;
+  2) echo "ccusage monitor already open for session ${sid:0:8}." ;;
+  *) echo "Could not open the pane — is iTerm Automation permission granted?" ;;
+esac
 exit 0
