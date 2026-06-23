@@ -13,6 +13,8 @@ cbm_fix_path
 sid="$1"
 transcript="$2"
 poll="${3:-3}"
+case "$poll" in ''|*[!0-9]*) poll=3 ;; esac
+[ "$poll" -lt 1 ] && poll=1
 ccu="$(cbm_ccusage)"
 
 # Ctrl-C drops to an interactive shell instead of closing the pane.

@@ -67,8 +67,13 @@ def cached_blocks(ttl):
         pass
     data = run_json(["blocks", "--active", "--json", "--offline"])
     if data is not None:
-        try: json.dump(data, open(cache, "w"))
-        except Exception: pass
+        try:  # atomic write so concurrent readers never see a half-written file
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cache))
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, cache)
+        except Exception:
+            pass
     return data
 
 def tail_lines(path, max_bytes=TAIL_BYTES):
@@ -87,7 +92,8 @@ def human(n):
     return str(int(n))
 
 def short_model(m):
-    return (m or "?").replace("claude-", "").replace("-20251001", "")
+    m = (m or "?").replace("claude-", "")
+    return re.sub(r"-20\d{6}$", "", m)  # strip any YYYYMMDD date suffix
 
 def hm(iso):
     try: return iso[11:16]

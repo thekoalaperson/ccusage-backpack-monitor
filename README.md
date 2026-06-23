@@ -5,7 +5,7 @@ change-driven [ccusage](https://github.com/ryoppippi/ccusage) readout** for the
 session you just started — and closes that pane automatically when the session
 ends. Think of it as a usage "backpack" your session carries while it runs.
 
-> **Status:** v0.1.0 — macOS + iTerm2 only. On any other terminal the hooks
+> **Status:** v0.4.0 — macOS + iTerm2 only. On any other terminal the hooks
 > no-op silently, so it's safe to install anywhere.
 
 ## Why
@@ -20,10 +20,11 @@ only when something actually changed, so it's near-live yet idle-cheap.
 - **macOS** with **iTerm2** (the pane is opened via iTerm2's AppleScript).
 - [`ccusage`](https://github.com/ryoppippi/ccusage) — `brew install ccusage`
   (recommended), or it falls back to `npx -y ccusage@latest` if Node is present.
-- **`python3`** for the rich colored panel + sparkline. On a fresh macOS this
-  lives at `/usr/bin/python3` and may prompt to install the Xcode Command Line
-  Tools the first time. If `python3` is missing, the pane **degrades gracefully**
-  to plain `ccusage session` text output — it does not error.
+- **`python3`** powers the *rich* colored panel + sparkline (on macOS it's at
+  `/usr/bin/python3`, which may prompt to install the Xcode Command Line Tools
+  the first time). It is **not required** for the plugin to work: the hooks parse
+  their input in pure shell, so the pane still opens without python3 and simply
+  shows plain `ccusage session` text instead of the rich panel — no error.
 - One-time: allow the macOS Automation prompt ("iTerm wants to control iTerm").
 
 ### Where it works (and where it no-ops)

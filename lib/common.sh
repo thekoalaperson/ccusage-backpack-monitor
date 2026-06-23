@@ -33,7 +33,9 @@ cbm_is_iterm() {
   [ "$TERM_PROGRAM" = "iTerm.app" ] || [ -n "$ITERM_SESSION_ID" ]
 }
 
-# Read one top-level field from hook JSON supplied on stdin.
+# Read one top-level string field from hook JSON supplied on stdin.
+# Pure shell (no python3) so the hooks work even without python3 installed —
+# the rich panel still degrades to plain text in that case, as documented.
 cbm_json_field() {
-  /usr/bin/python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))" 2>/dev/null
+  sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
