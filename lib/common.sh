@@ -5,12 +5,46 @@
 # Resolve how to invoke ccusage. Prints a command string that may contain
 # spaces (e.g. the npx fallback), so callers should run it via `eval`.
 cbm_ccusage() {
-  if command -v ccusage >/dev/null 2>&1; then printf 'ccusage'; return; fi
+  if command -v ccusage >/dev/null 2>&1; then printf 'ccusage'; return 0; fi
   local d
   for d in /opt/homebrew/bin /usr/local/bin "$HOME/.bun/bin" "$HOME/.deno/bin" "$HOME/.local/bin"; do
-    if [ -x "$d/ccusage" ]; then printf '%s/ccusage' "$d"; return; fi
+    if [ -x "$d/ccusage" ]; then printf '%s/ccusage' "$d"; return 0; fi
   done
-  printf 'npx -y ccusage@latest'
+  # No ccusage binary installed. Fall back to a package runner, but ONLY if one
+  # actually exists. Otherwise print nothing and return 1, so callers can show a
+  # clear "install ccusage" message instead of emitting an unrunnable command
+  # that dies with a cryptic "npx: command not found".
+  if command -v npx  >/dev/null 2>&1; then printf 'npx -y ccusage@latest';         return 0; fi
+  if command -v bunx >/dev/null 2>&1; then printf 'bunx ccusage@latest';            return 0; fi
+  if command -v deno >/dev/null 2>&1; then printf 'deno run -A npm:ccusage@latest'; return 0; fi
+  return 1
+}
+
+# Human-facing explanation shown when ccusage can't be run at all. Centralized
+# here so the in-pane watcher and the SessionStart hook surface the SAME fix.
+# $1 = "plain" (default, multi-line for the pane) or "oneline" (for hook output).
+cbm_no_ccusage_msg() {
+  if [ "$1" = "oneline" ]; then
+    printf 'ccusage-backpack-monitor: ccusage not found (and no node/bun/deno to run it). Install it with: brew install ccusage'
+    return
+  fi
+  cat <<'MSG'
+ccusage-backpack-monitor
+
+  ccusage is this panel's data source, but it isn't installed — and no JS
+  runtime (node / bun / deno) was found to run it. So there's nothing to show.
+
+  Fix it (this also pulls in node):
+
+      brew install ccusage
+
+  No Homebrew yet? Install it first, then run the line above:
+
+      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+  Then start a fresh claude, or run  /ccusage-backpack-monitor:ccusage-monitor
+  Docs: https://ccusage.com/guide/installation
+MSG
 }
 
 # Ensure common bin dirs are on PATH. Needed because the terminal execs the
@@ -114,3 +148,12 @@ OSA
 
 # Single-quote a string for safe use as one shell word.
 cbm_shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# Quote $1 as a JSON string literal (escapes backslash and double-quote). Our
+# messages are single-line, so this is sufficient for embedding in hook output.
+cbm_json_quote() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '"%s"' "$s"
+}

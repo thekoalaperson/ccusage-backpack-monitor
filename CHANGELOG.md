@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] - 2026-06-23
+
+### Fixed
+- When `ccusage` is not installed **and** no JS runtime (`node`/`npx`/`bun`/`deno`)
+  exists to run it, the pane no longer hangs on "waiting for … data…" or dies
+  with a cryptic `npx: command not found`. `cbm_ccusage()` now returns empty
+  instead of an unrunnable command, and the watcher detects this, prints the
+  exact fix (`brew install ccusage`), and drops into a shell so you can run it
+  in place.
+
+### Added
+- Single source of truth for the "install ccusage" guidance (`cbm_no_ccusage_msg`),
+  shared by the pane and the hook so the message can't drift.
+- The `SessionStart` hook now also surfaces the missing-ccusage notice *through
+  Claude* (via `additionalContext`) so the failure isn't silent if you're not
+  looking at the pane. Emitted **only** when ccusage genuinely can't run, so
+  normal sessions add zero context.
+- Recognize `bunx` and `deno` as additional ways to run ccusage.
+
 ## [0.5.1] - 2026-06-23
 
 ### Fixed
@@ -70,6 +89,7 @@ project uses [Semantic Versioning](https://semver.org/).
 - Change-driven watcher — idle cost is a single `stat`; `ccusage` runs only when
   the transcript changes. No-op on non-iTerm terminals.
 
+[0.5.2]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.5.2
 [0.5.1]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.5.1
 [0.5.0]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.5.0
 [0.4.0]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.4.0

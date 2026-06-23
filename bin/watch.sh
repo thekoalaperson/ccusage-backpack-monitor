@@ -25,6 +25,16 @@ if [ -z "$sid" ]; then
   exec "${SHELL:-/bin/zsh}" -il
 fi
 
+# No ccusage and no runtime to bootstrap it: there's no data source, so don't
+# loop forever on "waiting...". Explain the fix, then become a normal shell so
+# the user can run `brew install ccusage` right here.
+if [ -z "$ccu" ]; then
+  clear
+  cbm_no_ccusage_msg
+  printf '\n  (this pane is now a shell — paste the command above to fix it)\n\n'
+  exec "${SHELL:-/bin/zsh}" -il
+fi
+
 gray() { printf '\033[90m%s\033[0m\n' "$1"; }
 
 locate() {

@@ -19,7 +19,10 @@ only when something actually changed, so it's near-live yet idle-cheap.
 
 - **macOS** with **iTerm2** (the pane is opened via iTerm2's AppleScript).
 - [`ccusage`](https://github.com/ryoppippi/ccusage) — `brew install ccusage`
-  (recommended), or it falls back to `npx -y ccusage@latest` if Node is present.
+  (recommended; this also pulls in the `node` it needs). It otherwise falls back
+  to `npx`/`bunx`/`deno` if one is present. ccusage is a JavaScript CLI, so it
+  needs **some** runtime — if none is found, the pane tells you exactly that and
+  how to fix it (rather than hanging or failing cryptically).
 - **`python3`** powers the *rich* colored panel + sparkline (on macOS it's at
   `/usr/bin/python3`, which may prompt to install the Xcode Command Line Tools
   the first time). It is **not required** for the plugin to work: the hooks parse
@@ -33,6 +36,7 @@ only when something actually changed, so it's near-live yet idle-cheap.
 |---|---|
 | macOS + iTerm2 + ccusage + python3 | Full rich panel (cost, burn rate, sparkline) |
 | macOS + iTerm2, no python3        | Plain `ccusage` text fallback, still live    |
+| macOS + iTerm2, **no ccusage / no JS runtime** | Pane shows the exact fix (`brew install ccusage`) and becomes a shell so you can run it |
 | Any non-iTerm terminal            | Hooks **no-op silently** (safe to leave installed) |
 | Linux / Windows                   | No-op (no iTerm2 AppleScript); not yet supported |
 
