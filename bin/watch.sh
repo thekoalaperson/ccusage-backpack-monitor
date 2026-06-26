@@ -53,7 +53,9 @@ render() {
   gray "session ${sid:0:8}  |  live (updates on change)  |  Ctrl-C to stop"
 }
 
-last=""
+# Sentinel (not "") so the first iteration always renders — and so a host where
+# stat yields no signature still renders once before idling, rather than never.
+last="__init__"
 while true; do
   locate
   if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then

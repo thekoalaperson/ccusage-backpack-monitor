@@ -106,7 +106,10 @@ cbm_detect_iterm()   { [ "${TERM_PROGRAM:-}" = "iTerm.app" ] || [ -n "${ITERM_SE
 # Back-compat alias: older call sites / external scripts may still ask this.
 cbm_is_iterm() { cbm_detect_iterm; }
 
-# Resolve the active backend, in priority order, and memoize it for this process.
+# Resolve the active backend, in priority order. Detection is deterministic
+# within a process and cheap (a couple of `command -v` + env checks), so the
+# few callers that re-resolve via $(cbm_backend) simply re-run it; the hot path
+# (cbm_open_pane) resolves once into a local and threads it through explicitly.
 # tmux ranks FIRST: $TMUX is set even when tmux runs inside iTerm2/WezTerm, and a
 # GUI split there would live outside the multiplexer's pane tree (alive/close,
 # which speak tmux, could never reconcile it). The multiplexer owns the layout.
@@ -228,7 +231,12 @@ cbm_open_pane() {  # $1=sid  $2=trans
   cmd="$watcher $(cbm_shq "$sid") $(cbm_shq "$trans") $(cbm_shq "$poll")"
   handle="$("cbm_open_$backend" "$cmd" "$split")" || return 1
   [ -z "$handle" ] && return 1
-  cbm_state_write "$prev" "$backend" "$handle"   # overwrites any stale file
+  # If we can't record the pane, close it again rather than leaking an orphan
+  # that SessionEnd (which keys off the state file) could never find.
+  if ! cbm_state_write "$prev" "$backend" "$handle"; then   # overwrites any stale file
+    "cbm_close_$backend" "$handle" 2>/dev/null
+    return 1
+  fi
   return 0
 }
 
@@ -275,6 +283,8 @@ cbm_open_wezterm() {  # $1=cmd  $2=split  -> prints <int>
 }
 cbm_alive_wezterm() {  # $1=handle
   [ -n "$1" ] || return 1
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac   # handle must be a bare integer
+  # (so a corrupt state file can't inject regex metacharacters below).
   # JSON is the stable interface (the column layout of the text table drifts
   # across versions). Split on , { } so each "pane_id": N is isolated, then
   # anchor the integer so id 1 != 12. Parse failure => not found (safe: the
@@ -361,14 +371,15 @@ cbm_login_shell() {
   command -v bash >/dev/null 2>&1 && { command -v bash; return; }
   printf '/bin/sh'
 }
-# Drop the pane into an interactive shell. Use -il only for bash/zsh; plain
-# /bin/sh (dash) rejects -l and would kill the pane.
+# Drop the pane into an interactive login shell (-il), matching the historical
+# behavior for bash/zsh/fish/ksh. Only POSIX sh/dash get -i, since they reject
+# -l and would otherwise kill the pane.
 cbm_exec_shell() {
   local sh
   sh="$(cbm_login_shell)"
   case "$(basename "$sh")" in
-    bash|zsh) exec "$sh" -il ;;
-    *)        exec "$sh" -i  ;;
+    sh|dash) exec "$sh" -i  ;;
+    *)       exec "$sh" -il ;;
   esac
 }
 
