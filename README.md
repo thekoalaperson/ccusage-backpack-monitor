@@ -5,6 +5,11 @@ change-driven [ccusage](https://github.com/ryoppippi/ccusage) readout** for the
 session you just started — and closes that pane automatically when the session
 ends. Think of it as a usage "backpack" your session carries while it runs.
 
+<p align="center">
+  <img src="assets/hero.png" width="820"
+       alt="A live ccusage cost pane — spend, per-model breakdown, burn rate, and a tokens-per-turn sparkline — in an iTerm2 split beside a Claude Code session">
+</p>
+
 > **Status:** v0.5.1 — macOS + iTerm2 only. On any other terminal the hooks
 > no-op silently, so it's safe to install anywhere.
 
