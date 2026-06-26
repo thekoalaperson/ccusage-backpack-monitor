@@ -2,13 +2,13 @@
   "name": "ccusage-backpack-monitor",
   "owner": { "name": "Kartavya Kothari", "url": "https://github.com/thekoalaperson" },
   "metadata": {
-    "description": "Live iTerm2 side-pane usage monitor for Claude Code, powered by ccusage."
+    "description": "Live side-pane usage monitor for Claude Code (tmux, WezTerm, iTerm2), powered by ccusage. macOS + Linux."
   },
   "plugins": [
     {
       "name": "ccusage-backpack-monitor",
       "source": ".",
-      "description": "Opens an iTerm2 side pane with a live, change-driven ccusage readout for the current session; closes it on exit."
+      "description": "Opens a live, change-driven ccusage readout in a side pane (tmux, WezTerm, or iTerm2) for the current session; closes it on exit."
     }
   ]
 }

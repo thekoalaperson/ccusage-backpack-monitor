@@ -1,10 +1,10 @@
 {
   "name": "ccusage-backpack-monitor",
-  "description": "Opens an iTerm2 side pane with a live, change-driven ccusage readout for the current Claude Code session, and closes it automatically when the session ends.",
-  "version": "0.5.2",
+  "description": "Opens a live, change-driven ccusage readout in a side pane (tmux, WezTerm, or iTerm2) for the current Claude Code session, and closes it automatically when the session ends. Works on macOS and Linux.",
+  "version": "0.6.0",
   "author": { "name": "Kartavya Kothari", "url": "https://github.com/thekoalaperson" },
   "homepage": "https://github.com/thekoalaperson/ccusage-backpack-monitor",
   "repository": "https://github.com/thekoalaperson/ccusage-backpack-monitor",
   "license": "MIT",
-  "keywords": ["ccusage", "usage", "cost", "tokens", "iterm2", "monitor", "statusline"]
+  "keywords": ["ccusage", "usage", "cost", "tokens", "tmux", "wezterm", "iterm2", "linux", "monitor", "statusline"]
 }
