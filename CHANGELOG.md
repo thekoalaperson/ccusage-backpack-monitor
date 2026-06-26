@@ -4,6 +4,43 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-06-26
+
+### Added
+- **Multi-terminal support via a pluggable backend abstraction.** The plugin no
+  longer hard-codes iTerm2. Each terminal is a "backend" implementing four small
+  operations (detect / open / alive / close), and a cached `cbm_backend()`
+  resolves the active one in priority order (**tmux → WezTerm → iTerm2**).
+- **tmux backend** — opens the monitor in a `tmux split-window`. This unlocks
+  **Linux** (and tmux-on-macOS), which were previously unsupported. tmux is
+  detected first so it wins even when running inside iTerm2/WezTerm (a GUI split
+  there would live outside the multiplexer's pane tree).
+- **WezTerm backend** — opens via `wezterm cli split-pane`; cross-platform.
+  New `CBM_WEZTERM_PERCENT` (default `40`) sets the split size.
+- `CBM_BACKEND` env var to force/override the detected backend (handy for tests).
+
+### Changed
+- **Backend-tagged state file.** The per-session `.pane` file is now two lines
+  (`backend` + `handle`) so the `SessionEnd` hook — a fresh process whose
+  environment may differ from open time — closes via the *recorded* backend
+  instead of re-detecting. Legacy single-line files are still read (as iTerm2).
+- `plugin.json`/marketplace description and keywords updated for tmux/WezTerm/Linux.
+
+### Fixed
+- **Portability for non-macOS hosts** (required for tmux/WezTerm on Linux):
+  - The change-signature `stat` now tries GNU `stat -c` first, then BSD `stat -f`.
+    (BSD `-f` on Linux means *filesystem info* and prints a churning table, which
+    would have re-rendered the panel on nearly every poll.)
+  - `python3` is resolved via `PATH` instead of the hard-coded `/usr/bin/python3`,
+    so the rich panel works where Python lives elsewhere.
+  - The Ctrl-C / fallback shell uses `-il` only for bash/zsh and `-i` for
+    `/bin/sh` (dash rejects `-l`), with a sane default when `$SHELL` is unset.
+- The "install ccusage" guidance is now OS-aware (`npm i -g ccusage` on Linux,
+  `brew install ccusage` on macOS), and `PATH` augmentation includes Linux
+  npm/local bin dirs.
+- iTerm2 behavior is unchanged — its AppleScript moved verbatim into the new
+  backend functions, and detection is identical on macOS + iTerm2.
+
 ## [0.5.2] - 2026-06-23
 
 ### Fixed
@@ -89,6 +126,7 @@ project uses [Semantic Versioning](https://semver.org/).
 - Change-driven watcher — idle cost is a single `stat`; `ccusage` runs only when
   the transcript changes. No-op on non-iTerm terminals.
 
+[0.6.0]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.6.0
 [0.5.2]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.5.2
 [0.5.1]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.5.1
 [0.5.0]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.5.0

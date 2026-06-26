@@ -6,8 +6,8 @@
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/../lib/common.sh"
 
-if ! cbm_is_iterm; then
-  echo "ccusage-backpack-monitor: not running under iTerm2 — nothing to open."
+if ! cbm_is_supported; then
+  echo "ccusage-backpack-monitor: no supported terminal (tmux/WezTerm/iTerm2) detected — nothing to open."
   exit 0
 fi
 
@@ -38,6 +38,6 @@ cbm_open_pane "$sid" "$trans"
 case $? in
   0) echo "✅ Opened ccusage monitor for session ${sid:0:8}." ;;
   2) echo "ccusage monitor already open for session ${sid:0:8}." ;;
-  *) echo "Could not open the pane — is iTerm Automation permission granted?" ;;
+  *) echo "Could not open the pane (backend: $(cbm_backend)). On iTerm2, check Automation permission." ;;
 esac
 exit 0
