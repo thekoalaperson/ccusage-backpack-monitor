@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-07-06
+
+### Fixed
+- **tmux and WezTerm were reported as "unsupported" and fell back to iTerm-only
+  behavior.** Terminal detection required the CLI on `PATH` (`command -v tmux` /
+  `command -v wezterm`), but the `SessionStart` hook and the `/ccusage-monitor`
+  command run with a stripped `PATH` that usually lacks Homebrew — so the probe
+  failed and the plugin decided no supported terminal was present. iTerm2, which
+  is detected purely from env vars, kept working, which is why only iTerm worked.
+  - Detection now keys off env vars only (`$TMUX`, `$WEZTERM_PANE`,
+    `$TERM_PROGRAM`), which are authoritative for "which terminal am I in." CLI
+    availability is handled at open time instead (PATH is fixed first, then a
+    clean failure if the split command can't run).
+  - `cbm_fix_path` now runs **before** the support check in `bin/open-pane.sh`,
+    and is now called in `bin/open-now.sh` (it was missing entirely).
+  - `cbm_fix_path` also covers MacPorts (`/opt/local/bin`) and the WezTerm.app
+    bundled CLI (`/Applications/WezTerm.app/Contents/MacOS`).
+
 ## [0.6.0] - 2026-06-26
 
 ### Added
@@ -126,6 +144,7 @@ project uses [Semantic Versioning](https://semver.org/).
 - Change-driven watcher — idle cost is a single `stat`; `ccusage` runs only when
   the transcript changes. No-op on non-iTerm terminals.
 
+[0.6.1]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.6.1
 [0.6.0]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.6.0
 [0.5.2]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.5.2
 [0.5.1]: https://github.com/thekoalaperson/ccusage-backpack-monitor/releases/tag/v0.5.1

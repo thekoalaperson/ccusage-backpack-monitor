@@ -79,7 +79,7 @@ MSG
 # watcher with a bare, non-login shell that lacks Homebrew/npm paths. Covers
 # both macOS (Homebrew) and Linux (npm-global / local) install locations.
 cbm_fix_path() {
-  export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$HOME/.bun/bin:$HOME/.deno/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/node_modules/.bin:$PATH"
+  export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/opt/local/bin:$HOME/.bun/bin:$HOME/.deno/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/node_modules/.bin:/Applications/WezTerm.app/Contents/MacOS:$PATH"
 }
 
 # Directory for tiny pane-state files. MUST be identical across contexts:
@@ -97,10 +97,16 @@ cbm_state_dir() {
 # Backend resolution + dispatch
 # ---------------------------------------------------------------------------
 
-# Detectors: return 0 when that terminal is the active one. Env vars are read
-# with ${VAR:-} so the detectors are safe even under `set -u`.
-cbm_detect_tmux()    { [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; }
-cbm_detect_wezterm() { { [ -n "${WEZTERM_PANE:-}" ] || [ "${TERM_PROGRAM:-}" = "WezTerm" ]; } && command -v wezterm >/dev/null 2>&1; }
+# Detectors: return 0 when that terminal is the active one. These key off ENV
+# VARS only — never `command -v <cli>` — because the env var is authoritative
+# ($TMUX/$WEZTERM_PANE are set by a live tmux/WezTerm) AND because hooks and
+# slash commands frequently run with a stripped PATH that lacks Homebrew, so a
+# `command -v` probe would spuriously report "unsupported" for a terminal we're
+# clearly inside. Whether the CLI is actually runnable is handled at open time
+# (cbm_fix_path first, then a graceful return 1 if the split command fails).
+# Vars are read with ${VAR:-} so the detectors are safe even under `set -u`.
+cbm_detect_tmux()    { [ -n "${TMUX:-}" ]; }
+cbm_detect_wezterm() { [ -n "${WEZTERM_PANE:-}" ] || [ "${TERM_PROGRAM:-}" = "WezTerm" ]; }
 cbm_detect_iterm()   { [ "${TERM_PROGRAM:-}" = "iTerm.app" ] || [ -n "${ITERM_SESSION_ID:-}" ]; }
 
 # Back-compat alias: older call sites / external scripts may still ask this.

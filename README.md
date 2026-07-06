@@ -55,6 +55,11 @@ only when something actually changed, so it's near-live yet idle-cheap.
 | tmux or WezTerm on **Linux** | Full support |
 | Any other terminal (plain Terminal.app, kitty, Ghostty, …) | Hooks **no-op silently** (safe to leave installed) |
 
+> **In an unsupported terminal (Terminal.app, VS Code, Ghostty, …)?** Those apps
+> have no scriptable split-pane, so the plugin can't draw the monitor there. The
+> universal workaround is **tmux**: run `tmux`, then `claude` inside it, and the
+> monitor opens as a tmux split — in *any* terminal.
+
 No `watch`, `jq`, or charting libraries are required — the only hard runtime
 dependencies are `ccusage`, a supported terminal, and (for the rich view) the
 stock `python3`.
