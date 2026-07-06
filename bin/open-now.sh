@@ -5,6 +5,7 @@
 
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/../lib/common.sh"
+cbm_fix_path   # slash commands run with a stripped PATH; make tmux/wezterm/ccusage findable
 
 if ! cbm_is_supported; then
   echo "ccusage-backpack-monitor: no supported terminal (tmux/WezTerm/iTerm2) detected — nothing to open."

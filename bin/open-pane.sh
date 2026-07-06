@@ -16,8 +16,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/../lib/common.sh"
 
 input="$(cat)"
+cbm_fix_path                 # put Homebrew/npm (tmux, wezterm, ccusage) on PATH FIRST
 cbm_is_supported || exit 0   # no-op unless tmux/WezTerm/iTerm2 is active
-cbm_fix_path                 # so ccusage/runtime detection here matches the pane's
 
 sid="$(printf '%s' "$input"   | cbm_json_field session_id)"
 trans="$(printf '%s' "$input" | cbm_json_field transcript_path)"
