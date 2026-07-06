@@ -8,7 +8,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 cbm_fix_path   # slash commands run with a stripped PATH; make tmux/wezterm/ccusage findable
 
 if ! cbm_is_supported; then
-  echo "ccusage-backpack-monitor: no supported terminal (tmux/WezTerm/iTerm2) detected — nothing to open."
+  echo "ccusage-backpack-monitor: this terminal can't be scripted to open a side pane"
+  echo "  (supported: tmux, WezTerm, iTerm2). Terminal.app / VS Code / Ghostty have no"
+  echo "  split-pane API, so there's nothing to open here."
+  echo "  Tip: run Claude inside tmux — 'tmux', then 'claude' — and the monitor opens"
+  echo "  as a tmux split in ANY terminal."
   exit 0
 fi
 
