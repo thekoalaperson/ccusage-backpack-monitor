@@ -6,6 +6,8 @@
 # Config (env vars, all optional):
 #   CBM_POLL   seconds between cheap file-change checks (default 3)
 #   CBM_SPLIT  "vertically" (side-by-side) or "horizontally" (default vertically)
+#   CBM_SIZE   percent of the terminal the pane takes, 5-90 (default 25) -- the
+#              main Claude session keeps the rest (a 3:1 split by default)
 #
 # Notes:
 #  - On iTerm2, the first run triggers a one-time macOS Automation prompt.

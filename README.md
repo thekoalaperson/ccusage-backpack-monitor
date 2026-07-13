@@ -12,7 +12,7 @@ It works in **tmux**, **WezTerm**, and **iTerm2**, on **macOS and Linux**.
        alt="A live ccusage cost pane — spend, per-model breakdown, burn rate, and a tokens-per-turn sparkline — in a side pane beside a Claude Code session">
 </p>
 
-> **Status:** v0.6.0 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
+> **Status:** v0.7.0 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
 > iTerm2 (macOS). In any other terminal the hooks no-op silently, so it's safe
 > to install anywhere.
 
@@ -101,8 +101,9 @@ Set these as environment variables before launching `claude`:
 |----------------------|---------------|------------------------------------------------------|
 | `CBM_POLL`           | `3`           | Seconds between cheap file-change checks              |
 | `CBM_SPLIT`          | `vertically`  | `vertically` (side-by-side) or `horizontally`        |
+| `CBM_SIZE`           | `25`          | Percent of the terminal the monitor pane takes (clamped to 5–90). The main Claude session keeps the rest, so the default is a 3:1 split in Claude's favor. Applies to **all** backends (tmux, WezTerm, iTerm2). |
 | `CBM_BACKEND`        | _(auto)_      | Force a terminal backend: `tmux`, `wezterm`, or `iterm`. Unset = auto-detect (tmux → WezTerm → iTerm2). |
-| `CBM_WEZTERM_PERCENT`| `40`          | WezTerm split size as a percent of the source pane   |
+| `CBM_WEZTERM_PERCENT`| `CBM_SIZE`    | WezTerm-only override for the split size (percent of the source pane). Unset, it inherits `CBM_SIZE`. |
 | `CBM_BLOCKS`         | `1`           | `0` hides the 5h burn-rate/projection section (skips that account-wide call entirely) |
 | `CBM_BLOCKS_TTL`     | `30`          | Seconds to cache the burn-rate call so frequent turns don't re-trigger the scan |
 | `CBM_GRAPH`          | `1`           | `0` hides the sparkline                              |

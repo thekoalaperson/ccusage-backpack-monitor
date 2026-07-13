@@ -4,6 +4,28 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-07-13
+
+### Added
+- **`CBM_SIZE` — the monitor pane now opens at a fraction of the screen instead
+  of half of it.** New env var sets the percent of the terminal the pane takes
+  (clamped to a sane 5–90); the main Claude session keeps the rest. It applies to
+  **every** backend — tmux, WezTerm, and iTerm2 — so the split is consistent no
+  matter which terminal you're in.
+
+### Changed
+- **Default split is now 3:1 in the Claude session's favor (pane = 25%).**
+  Previously the pane grabbed half the screen (tmux/iTerm2) or 40% (WezTerm).
+  - **tmux** now passes `-l <pct>%` to `split-window`. On tmux older than 3.1
+    (which lacks `-l N%`) it falls back to a plain even split, so the monitor
+    still opens rather than failing.
+  - **iTerm2** has no size option on its AppleScript `split` (it always halves
+    the pane), so it now records the pre-split size and shrinks the new pane to
+    `<pct>%` afterward, wrapped in `try` — if iTerm won't honor the resize the
+    50/50 pane is kept rather than failing the open.
+- **`CBM_WEZTERM_PERCENT` now defaults to `CBM_SIZE`** (was a fixed `40`). Set it
+  explicitly to keep a WezTerm-only override; unset, WezTerm follows `CBM_SIZE`.
+
 ## [0.6.1] - 2026-07-06
 
 ### Fixed

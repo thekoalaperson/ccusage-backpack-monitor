@@ -222,10 +222,17 @@ cbm_open_pane() {  # $1=sid  $2=trans
     if [ -n "$ph" ] && cbm_pane_alive "$ph" "$pb"; then return 2; fi
   fi
 
-  local poll="${CBM_POLL:-3}" split="${CBM_SPLIT:-vertically}"
+  local poll="${CBM_POLL:-3}" split="${CBM_SPLIT:-vertically}" size="${CBM_SIZE:-25}"
   case "$poll" in ''|*[!0-9]*) poll=3 ;; esac
   [ "$poll" -lt 1 ] && poll=1
   case "$split" in vertically|horizontally) ;; *) split=vertically ;; esac
+  # Share of the terminal the monitor pane takes; the main Claude session keeps
+  # the rest. Default 25% -> a 3:1 split favoring Claude (three columns to it, one
+  # to the pane). Clamp to a sane band so a typo can't produce a 0%/sliver pane or
+  # one that swallows the screen.
+  case "$size" in ''|*[!0-9]*) size=25 ;; esac
+  [ "$size" -lt 5 ]  && size=5
+  [ "$size" -gt 90 ] && size=90
 
   # Build the watcher invocation as a self-contained shell program: each arg is
   # single-quoted (cbm_shq) so a hostile sid/transcript can't break out. Each
@@ -235,7 +242,7 @@ cbm_open_pane() {  # $1=sid  $2=trans
   # of cwd/OS.
   local cmd handle
   cmd="$watcher $(cbm_shq "$sid") $(cbm_shq "$trans") $(cbm_shq "$poll")"
-  handle="$("cbm_open_$backend" "$cmd" "$split")" || return 1
+  handle="$("cbm_open_$backend" "$cmd" "$split" "$size")" || return 1
   [ -z "$handle" ] && return 1
   # If we can't record the pane, close it again rather than leaking an orphan
   # that SessionEnd (which keys off the state file) could never find.
@@ -251,16 +258,21 @@ cbm_open_pane() {  # $1=sid  $2=trans
 # ---------------------------------------------------------------------------
 # Split map preserves the iTerm semantics (vertically = side-by-side): tmux's -h
 # splits left/right, -v splits top/bottom (the classic tmux naming inversion).
-cbm_open_tmux() {  # $1=cmd  $2=split  -> prints %N
-  local cmd="$1" dir=-h
+cbm_open_tmux() {  # $1=cmd  $2=split  $3=size%  -> prints %N
+  local cmd="$1" dir=-h pct="${3:-25}" id
   [ "$2" = horizontally ] && dir=-v
   # Build argv so -t <pane> is only added when $TMUX_PANE is set. Everything
   # after `--` is forwarded verbatim to exec as [sh, -c, <cmd>]; tmux does NO
   # word-splitting there, so sh -c is the sole parser of cmd's inner quoting.
   set -- split-window "$dir" -d -P -F '#{pane_id}'
   [ -n "$TMUX_PANE" ] && set -- "$@" -t "$TMUX_PANE"
-  set -- "$@" -- /bin/sh -c "$cmd"
-  tmux "$@" 2>/dev/null
+  # Size the new pane to <pct>% of the split axis (width for -h, height for -v).
+  # `-l N%` needs tmux >= 3.1; if that tmux rejects it the split creates no pane,
+  # so fall back to an even (default) split rather than leaving no monitor at all.
+  if id="$(tmux "$@" -l "${pct}%" -- /bin/sh -c "$cmd" 2>/dev/null)" && [ -n "$id" ]; then
+    printf '%s\n' "$id"; return 0
+  fi
+  tmux "$@" -- /bin/sh -c "$cmd" 2>/dev/null
 }
 cbm_alive_tmux() {  # $1=handle
   [ -n "$1" ] || return 1
@@ -276,10 +288,12 @@ cbm_close_tmux() {  # $1=handle
 # ---------------------------------------------------------------------------
 # Backend: WezTerm  (Linux + macOS). Handle = an integer pane id like 12.
 # ---------------------------------------------------------------------------
-cbm_open_wezterm() {  # $1=cmd  $2=split  -> prints <int>
-  local cmd="$1" dir=--right pct="${CBM_WEZTERM_PERCENT:-40}"
+cbm_open_wezterm() {  # $1=cmd  $2=split  $3=size%  -> prints <int>
+  # CBM_WEZTERM_PERCENT stays as an explicit per-backend override; unset, it
+  # inherits the unified size ($3, default 25).
+  local cmd="$1" dir=--right pct="${CBM_WEZTERM_PERCENT:-${3:-25}}"
   [ "$2" = horizontally ] && dir=--bottom
-  case "$pct" in ''|*[!0-9]*) pct=40 ;; esac
+  case "$pct" in ''|*[!0-9]*) pct=25 ;; esac
   # Only pass --pane-id when WEZTERM_PANE is set (never emit --pane-id ''). The
   # post-`--` argv goes straight to exec — same injection-safe model as tmux.
   set -- cli split-pane "$dir" --percent "$pct"
@@ -305,20 +319,31 @@ cbm_close_wezterm() {  # $1=handle
 }
 
 # ---------------------------------------------------------------------------
-# Backend: iTerm2  (macOS). Handle = an iTerm session id. AppleScript is moved
-# here verbatim from the old cbm_open_pane / close-pane.sh / cbm_pane_alive, so
-# iTerm behavior is byte-for-byte unchanged.
+# Backend: iTerm2  (macOS). Handle = an iTerm session id. The alive/close
+# AppleScript is unchanged from the original single-terminal implementation; only
+# open now resizes the new pane (see cbm_open_iterm) to honor CBM_SIZE.
 # ---------------------------------------------------------------------------
-cbm_open_iterm() {  # $1=cmd  $2=split  -> prints iTerm session id
+cbm_open_iterm() {  # $1=cmd  $2=split  $3=size%  -> prints iTerm session id
   # Single-quote each arg for the shell, then escape the whole string for the
   # AppleScript double-quoted literal (\ and ").
-  local osa_cmd
+  local osa_cmd pct="${3:-25}" dim=columns
+  # A vertical (side-by-side) split shares WIDTH -> size the new pane by columns;
+  # a horizontal (stacked) split shares HEIGHT -> size it by rows.
+  [ "$2" = horizontally ] && dim=rows
   osa_cmd="$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  # iTerm's `split` has no size option — it always halves the pane. So record the
+  # pre-split dimension, split, then shrink the new pane to <pct>% of it. The
+  # resize is wrapped in `try`: if iTerm won't honor it we keep the 50/50 pane
+  # rather than failing the whole open.
   /usr/bin/osascript 2>/dev/null <<OSA
 tell application "iTerm2"
   tell current session of current window
+    set parentDim to $dim
     set newSession to (split $2 with same profile command "$osa_cmd")
   end tell
+  try
+    set $dim of newSession to (parentDim * $pct) div 100
+  end try
   id of newSession
 end tell
 OSA
