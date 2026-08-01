@@ -40,7 +40,7 @@ gray() { printf '\033[90m%s\033[0m\n' "$1"; }
 
 locate() {
   if [ -n "$transcript" ] && [ -f "$transcript" ]; then return; fi
-  transcript="$(find "$HOME/.claude/projects" -name "$sid.jsonl" 2>/dev/null | head -1)"
+  transcript="$(find -L "$HOME/.claude/projects" -name "$sid.jsonl" 2>/dev/null | head -1)"
 }
 
 # Rich python panel when available; otherwise fall back to plain ccusage output.
