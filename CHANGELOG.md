@@ -4,6 +4,51 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] - 2026-08-02
+
+### Fixed
+- **The pane could follow a subagent instead of your session**, reporting one
+  agent's spend as the whole session's. Observed live: a session that had cost
+  **$941** across fable, opus, sonnet and haiku displayed as **$1.84, sonnet
+  only** — the transcript of a single `pixverse-v6-research` agent.
+
+  Slash commands run without `CLAUDE_SESSION_ID`, so the command had to guess,
+  and its guess was "newest transcript in the directory derived from `$PWD`".
+  When an agent runs with a different working directory it leaves its transcript
+  at the top level of *that* project directory, where it is indistinguishable
+  from a session by filename alone. A wrong number that looks entirely plausible
+  is the worst kind, so session resolution is now explicit:
+
+  - transcripts carrying `teamName`, or living under a `subagents/` directory,
+    are agents and are **never** chosen as a session;
+  - matching is done on the `cwd` recorded *inside* transcripts rather than on a
+    path-to-directory-name transform, which is undocumented and would break on
+    paths containing spaces or other unusual characters;
+  - if only agents have run in a directory, the resolver follows one **home to
+    its session** — deterministically, rather than falling back to whichever
+    unrelated session happened to be written last;
+  - failing that, it uses the session started in the nearest **ancestor**
+    directory, since Claude records where a session began, not where you have
+    since navigated.
+
+  Agents spawn agents (a workflow coordinator is itself an agent), so the walk
+  up the chain is recursive, cycle-guarded, and depth-capped. If the chain is
+  broken — the parent transcript deleted — it reports no session rather than
+  returning an agent. Verified across every working directory recorded on a real
+  machine: **0 of 10 now resolve to an agent** (previously 1, plus 5 that landed
+  on an unrelated session by mtime luck).
+- **If an agent transcript is rendered anyway, the panel now says so**
+  (`agent pixverse-v6-research of session d6ac3aa3`) instead of presenting it as
+  the session.
+
+### Added
+- `bin/resolve-session.py`, with a shell fallback that still skips `subagents/`
+  paths on hosts without python3.
+- 17 more tests (58 total) covering session resolution: agents never chosen,
+  stray agents followed home, agent-of-agent chains, broken chains, cycles,
+  ancestor-directory matching, concurrent sessions, paths with spaces and
+  unicode, `.`/`..`/trailing-slash normalisation, and a missing projects root.
+
 ## [0.9.0] - 2026-08-01
 
 Follow-up to 0.8.0, driven by using it: the slash command didn't behave the way

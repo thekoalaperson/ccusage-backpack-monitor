@@ -16,20 +16,36 @@ if ! cbm_is_supported; then
   exit 0
 fi
 
-# Identify the current session + transcript:
-#  1) $CLAUDE_SESSION_ID if Claude Code exported it,
-#  2) else the most-recently-active transcript in this project's dir,
-#  3) else the newest transcript anywhere.
+# Identify the current session + transcript. Slash commands run without
+# CLAUDE_SESSION_ID, so this has to be inferred — and inferring it badly is
+# worse than failing, because a subagent transcript rendered as a session shows
+# one agent's spend as the whole session's and looks entirely plausible.
+# resolve-session.py skips agent transcripts, matches on the cwd recorded inside
+# each transcript, and follows a stray agent back to its parent session.
 sid="${CLAUDE_SESSION_ID:-}"
 trans=""
-if [ -n "$sid" ]; then
-  trans="$(find "$HOME/.claude/projects" -name "$sid.jsonl" 2>/dev/null | head -1)"
-else
-  proj="$HOME/.claude/projects/$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
-  newest="$(ls -t "$proj"/*.jsonl 2>/dev/null | head -1)"
-  [ -z "$newest" ] && newest="$(ls -t "$HOME"/.claude/projects/*/*.jsonl 2>/dev/null | head -1)"
-  trans="$newest"
-  [ -n "$newest" ] && sid="$(basename "$newest" .jsonl)"
+resolver="$here/resolve-session.py"
+py="$(cbm_python)"
+if [ -n "$py" ] && [ -f "$resolver" ]; then
+  line="$("$py" "$resolver" "$PWD" "$sid" 2>/dev/null)"
+  if [ -n "$line" ]; then
+    sid="${line%%	*}"
+    trans="${line#*	}"
+  fi
+fi
+
+# Shell-only fallback for hosts without python3. Still avoids the worst case by
+# skipping transcripts that live under a subagents/ directory.
+if [ -z "$trans" ]; then
+  if [ -n "$sid" ]; then
+    trans="$(find "$HOME/.claude/projects" -name "$sid.jsonl" 2>/dev/null | head -1)"
+  else
+    proj="$HOME/.claude/projects/$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
+    newest="$(ls -t "$proj"/*.jsonl 2>/dev/null | head -1)"
+    [ -z "$newest" ] && newest="$(ls -t "$HOME"/.claude/projects/*/*.jsonl 2>/dev/null | head -1)"
+    trans="$newest"
+    [ -n "$newest" ] && sid="$(basename "$newest" .jsonl)"
+  fi
 fi
 
 if [ -z "$sid" ]; then

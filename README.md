@@ -16,7 +16,7 @@ It works in **tmux**, **WezTerm**, and **iTerm2**, on **macOS and Linux**.
        alt="A live ccusage cost pane — spend, per-model breakdown, burn rate, and a tokens-per-turn sparkline — in a side pane beside a Claude Code session">
 </p>
 
-> **Status:** v0.9.0 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
+> **Status:** v0.9.1 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
 > iTerm2 (macOS). In any other terminal the hooks no-op silently, so it's safe
 > to install anywhere.
 
@@ -182,6 +182,7 @@ never re-read.
 | render | `bin/watch.sh`      | —              | stat transcript + agents; on change, draw       |
 | panel  | `lib/render.py`     | —              | rich colored cost/agents/burn-rate view         |
 | cost   | `lib/usage.py`      | —              | transcript scan, dedup, subagent attribution    |
+| pick   | `bin/resolve-session.py` | —         | works out which session a pane should follow    |
 | rates  | `lib/pricing.py`    | —              | model pricing with daily refresh + fallbacks    |
 | close  | `bin/close-pane.sh` | `SessionEnd`   | look up the handle, close that exact pane via its backend |
 
@@ -203,10 +204,10 @@ command must agree on it, so the close hook can find a pane the command opened.)
 python3 tests/test_usage.py
 ```
 
-40 fixture-based regression tests covering pricing resolution, deduplication,
-subagent attribution, 5h block math, context-window handling, the open/close/
-restart toggle, and panel rendering (including an overflow check at every pane
-width). They build their own transcripts in a temp directory — they never read
+58 fixture-based regression tests covering pricing resolution, deduplication,
+subagent attribution, 5h block math, context-window handling, session
+resolution (agents are never mistaken for sessions), the open/close/restart
+toggle, and panel rendering (including an overflow check at every pane width). They build their own transcripts in a temp directory — they never read
 your real usage data and never touch the network.
 
 ## Roadmap

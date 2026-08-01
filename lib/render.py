@@ -206,6 +206,15 @@ pricing = Pricing()
 scan = Scanner(pricing)
 sess = scan.session(sid, transcript)
 
+# If we were pointed at a subagent transcript, say so. Rendering one silently as
+# "the session" reports a single agent's spend as the whole session's — a wrong
+# number that looks entirely plausible, which is the worst kind.
+own = scan.scan_file(transcript) or {}
+agent_of = None
+_team = own.get("team") or ""
+if _team.startswith("session-"):
+    agent_of = _team[len("session-"):][:8]
+
 models = sorted(((n, m) for n, m in sess["models"].items()
                  if m["cost"] > 0 or m["input"] + m["output"] > 0),
                 key=lambda kv: -kv[1]["cost"])
@@ -221,6 +230,11 @@ out = []
 # ---- header ---------------------------------------------------------------
 out.append(line(fit([("%s%sccusage%s" % (BOLD, CYAN, RESET), True),
                      ("  %s%s%s" % (WHITE, sid[:8], RESET), False)])))
+if agent_of:
+    out.append(line(fit([
+        ("%sagent %s" % (YELLOW, own.get("agent") or "?"), True),
+        ("%s of session %s%s" % (GREY, agent_of, RESET), False),
+        ("%s" % RESET, True)])))
 out.append(line(fit([("%s%s%s%s" % (BOLD, GREEN, money(tot_cost), RESET), True),
                      ("  %s%s%s" % (BOLD, human(tot_tok), RESET), False),
                      ("%s tokens%s" % (BOLD, RESET), False)])))
