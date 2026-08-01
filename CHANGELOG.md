@@ -4,6 +4,56 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-08-01
+
+The panel now reads Claude Code's transcripts directly instead of shelling out
+to `ccusage session`. That one change fixes three wrong numbers and makes the
+pane roughly 200x cheaper to render.
+
+### Fixed
+- **Newer models no longer cost $0.00.** The panel passed `--offline`, which
+  prices from a snapshot baked into whichever ccusage you installed. Anything
+  released since then priced at zero — Opus 5 and Sonnet 5 showed `$0.00` next
+  to millions of tokens. Pricing now resolves against a bundled table, refreshed
+  daily from LiteLLM, with per-family estimates as a last resort so a model that
+  ships tomorrow is never silently free. Estimated rates are marked `~`.
+  (Upgrading ccusage alone did not fix this: 20.0.19 still zeroes Opus 5.)
+- **Subagent spend is no longer invisible.** Agents write to their own
+  transcripts under `<project>/<session-id>/subagents/`, which the old data
+  source largely missed — on one measured session that hid $523 across 171
+  agents, and two entire models (Opus 4.8 and Sonnet 5) never appeared. The
+  panel now attributes them to the parent session and breaks them out.
+- **Multi-block messages are no longer counted several times.** One assistant
+  response is written to the transcript once per content block, each line
+  carrying the same cumulative usage; a 13-block reply was billed 13x. Usage is
+  now deduplicated per API response.
+- **1-hour cache writes are priced correctly** at 2x input instead of 1.25x,
+  which had been under-reporting cache-heavy sessions by roughly 15%.
+- **The session total and the 5h figure now agree** — both come from the same
+  pricing path, so the panel can no longer show `$0.00` for the session and
+  `$143` for the window at the same moment.
+
+### Changed
+- Rendering costs ~0.07s instead of ~2s wall and ~16 CPU-seconds, because it
+  reads this session's files rather than rescanning every transcript on the
+  machine on every turn. Restores the plugin's own "idle-cheap" promise.
+- **`ccusage` is no longer required.** `python3` is enough; ccusage remains a
+  fallback when python3 is absent.
+- The watcher now also notices subagent activity, so the pane stays live during
+  a workflow fan-out when the main transcript is momentarily still.
+- Panel additions: a `you / agents` cost split, an `AGENTS` section, and a
+  distinct color for the Fable/Mythos family.
+
+### Added
+- `tests/test_usage.py` — 28 fixture-based regression tests covering pricing,
+  deduplication, subagent attribution, block math, and panel rendering. They
+  build their own transcripts in a temp directory and never touch real usage
+  data or the network.
+- Optional pricing overrides at
+  `~/.config/ccusage-backpack-monitor/pricing.json`.
+- `CBM_AGENTS=0` to hide the subagent section; `CBM_NO_NETWORK=1` to pin
+  pricing to the bundled table.
+
 ## [0.7.0] - 2026-07-13
 
 ### Added

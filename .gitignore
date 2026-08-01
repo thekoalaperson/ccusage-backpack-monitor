@@ -4,3 +4,7 @@ node_modules/
 
 # Local-only guidance; kept out of the public repo
 CLAUDE.md
+
+# Python bytecode
+__pycache__/
+*.pyc
