@@ -24,16 +24,16 @@ cbm_is_supported || exit 0   # no-op unless tmux/WezTerm/iTerm2 is active
 sid="$(printf '%s' "$input"   | cbm_json_field session_id)"
 trans="$(printf '%s' "$input" | cbm_json_field transcript_path)"
 
-# Open the pane. When ccusage can't run, the pane itself shows the fix and turns
-# into a shell, so this is still useful.
+# Open the pane. When the panel can't run, the pane itself shows the fix and
+# turns into a shell, so this is still useful.
 cbm_open_pane "$sid" "$trans"
 
-# Backstop: if ccusage genuinely can't run, also surface it *through Claude* so
+# Backstop: if the panel genuinely can't run, also surface it *through Claude* so
 # the failure isn't silent when the user isn't looking at the pane. Emitted ONLY
 # when actually broken (normal sessions print nothing -> zero context cost), via
 # SessionStart's additionalContext so the model can explain it on request.
-if ! cbm_ccusage >/dev/null 2>&1; then
-  note="$(cbm_no_ccusage_msg oneline) After installing, start a fresh claude or run /ccusage-backpack-monitor:ccusage-monitor."
+if ! cbm_python >/dev/null 2>&1 && ! cbm_ccusage >/dev/null 2>&1; then
+  note="$(cbm_no_source_msg oneline) After installing, start a fresh claude or run /ccusage-backpack-monitor:ccusage-monitor."
   printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' "$(cbm_json_quote "$note")"
 fi
 exit 0

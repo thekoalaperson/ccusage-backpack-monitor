@@ -15,8 +15,8 @@ transcript="$2"
 poll="${3:-3}"
 case "$poll" in ''|*[!0-9]*) poll=3 ;; esac
 [ "$poll" -lt 1 ] && poll=1
+py="$(cbm_python)"
 ccu="$(cbm_ccusage)"
-CBM_PY="$(command -v python3 2>/dev/null)"   # PATH-resolved (not /usr/bin only)
 
 # Ctrl-C drops to an interactive shell instead of closing the pane.
 trap 'cbm_exec_shell' INT
@@ -26,13 +26,13 @@ if [ -z "$sid" ]; then
   cbm_exec_shell
 fi
 
-# No ccusage and no runtime to bootstrap it: there's no data source, so don't
-# loop forever on "waiting...". Explain the fix, then become a normal shell so
-# the user can run `brew install ccusage` right here.
-if [ -z "$ccu" ]; then
+# The panel reads transcripts directly, so python3 alone is enough. Only when
+# python3 is missing too do we fall back to ccusage, and only when BOTH are
+# missing is there no data source at all.
+if [ -z "$py" ] && [ -z "$ccu" ]; then
   clear
-  cbm_no_ccusage_msg
-  printf '\n  (this pane is now a shell — paste the command above to fix it)\n\n'
+  cbm_no_source_msg
+  printf '\n  (this pane is now a shell — paste a command above to fix it)\n\n'
   cbm_exec_shell
 fi
 
@@ -45,12 +45,28 @@ locate() {
 
 # Rich python panel when available; otherwise fall back to plain ccusage output.
 render() {
-  if [ -n "$CBM_PY" ] && [ -f "$here/../lib/render.py" ]; then
-    CBM_CCUSAGE="$ccu" "$CBM_PY" "$here/../lib/render.py" "$sid" "$transcript" 2>/dev/null && return
+  if [ -n "$py" ] && [ -f "$here/../lib/render.py" ]; then
+    "$py" "$here/../lib/render.py" "$sid" "$transcript" 2>/dev/null && return
   fi
-  eval "$ccu session -i $sid --offline" 2>&1
+  [ -n "$ccu" ] || return 0
+  eval "$ccu session -i $(cbm_shq "$sid")" 2>&1
   gray ""
   gray "session ${sid:0:8}  |  live (updates on change)  |  Ctrl-C to stop"
+}
+
+# Change signature: the session transcript PLUS the directory its subagents
+# write into. During a workflow fan-out the main transcript can sit still for
+# minutes while agents spend money, so watching it alone would freeze the panel.
+# Uses cbm_stat_sig so it stays portable across GNU and BSD stat.
+signature() {
+  local agents="${transcript%.jsonl}/subagents" f
+  cbm_stat_sig "$transcript"
+  if [ -d "$agents" ]; then
+    # -newer than the transcript would miss idle agents; just fold them all in.
+    find "$agents" -name '*.jsonl' -print 2>/dev/null | while IFS= read -r f; do
+      cbm_stat_sig "$f"
+    done
+  fi
 }
 
 # Sentinel (not "") so the first iteration always renders — and so a host where
@@ -65,9 +81,9 @@ while true; do
     continue
   fi
 
-  # Cheap change signature: mtime-size (portable: GNU stat, then BSD). No render
-  # unless changed.
-  sig="$(cbm_stat_sig "$transcript")"
+  # Cheap change signature: mtime-size per file (portable: GNU stat, then BSD).
+  # No render unless something actually changed.
+  sig="$(signature)"
   if [ "$sig" != "$last" ]; then
     last="$sig"
     clear

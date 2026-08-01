@@ -38,31 +38,41 @@ cbm_ccusage() {
   return 1
 }
 
-# Human-facing explanation shown when ccusage can't be run at all. Centralized
-# here so the in-pane watcher and the SessionStart hook surface the SAME fix.
-# The install command is OS-aware now that Linux (via tmux/WezTerm) is supported:
-# Homebrew on macOS, npm/bun elsewhere.
+# Locate python3, which is what the panel actually needs. Prefer an absolute
+# path so a broken pyenv/asdf shim on PATH can't take the pane down; fall back
+# to PATH resolution for hosts where python lives elsewhere (Linux, nix).
+cbm_python() {
+  local d
+  for d in /usr/bin /opt/homebrew/bin /usr/local/bin /usr/local/opt/python/libexec/bin; do
+    if [ -x "$d/python3" ]; then printf '%s/python3' "$d"; return 0; fi
+  done
+  if command -v python3 >/dev/null 2>&1; then command -v python3; return 0; fi
+  return 1
+}
+
+# Human-facing explanation shown when the panel has no way to render at all.
+# Centralized here so the in-pane watcher and the SessionStart hook surface the
+# SAME fix. OS-aware, since Linux is supported via tmux/WezTerm.
 # $1 = "plain" (default, multi-line for the pane) or "oneline" (for hook output).
-cbm_no_ccusage_msg() {
+cbm_no_source_msg() {
   local install hint
   if cbm_is_macos; then
-    install='brew install ccusage'
-    hint='No Homebrew yet? Install it first, then run the line above:
-      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+    install='brew install python3'
+    hint='macOS also ships one with the Xcode Command Line Tools:
+      xcode-select --install'
   else
-    install='npm install -g ccusage'
-    hint='No npm? Install Node.js (your package manager, or https://nodejs.org),
-      or use bun:  bun add -g ccusage'
+    install='sudo apt install python3      # or: dnf install python3, pacman -S python'
+    hint='Any python3 on PATH works — no pip packages are needed.'
   fi
   if [ "$1" = "oneline" ]; then
-    printf 'ccusage-backpack-monitor: ccusage not found (and no node/bun/deno to run it). Install it with: %s' "$install"
+    printf 'ccusage-backpack-monitor: no python3 found (and no ccusage to fall back on). Install it with: %s' "$install"
     return
   fi
   cat <<MSG
 ccusage-backpack-monitor
 
-  ccusage is this panel's data source, but it isn't installed — and no JS
-  runtime (node / bun / deno) was found to run it. So there's nothing to show.
+  The panel reads Claude Code's own transcripts, so all it needs is python3 —
+  but none was found, and neither was ccusage as a fallback.
 
   Fix it:
 
@@ -71,7 +81,6 @@ ccusage-backpack-monitor
   $hint
 
   Then start a fresh claude, or run  /ccusage-backpack-monitor:ccusage-monitor
-  Docs: https://ccusage.com/guide/installation
 MSG
 }
 
