@@ -4,6 +4,37 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.9.2] - 2026-08-02
+
+### Fixed
+- **Opening the monitor could leave you with two panes.** Panes are tracked per
+  session id, so anything that changes which id gets resolved — the resolver fix
+  in 0.9.1, a resumed session — orphaned the existing pane: the "is one already
+  open?" check looked under the *new* id, found nothing, and opened a second one.
+  The old pane had to be closed by hand.
+
+  The toggle now acts on every live pane **belonging to this session**, which
+  includes a pane that was following one of the session's own agents. Panes
+  belonging to *other* sessions are never touched — several Claude sessions
+  commonly run side by side, each with its own monitor.
+- **Stale pane state now heals itself.** State files whose pane is gone (closed
+  by hand, crashed, rebooted) are pruned whenever the state directory is read,
+  instead of lingering until the one-day sweep.
+- **`find` follows a symlinked `~/.claude`.** Transcript lookups used `find`
+  without `-L`, which does not descend a symlinked starting path — so a user who
+  keeps `~/.claude` on another volume would silently find no transcripts.
+- The whitespace between JSON keys and values is no longer assumed when matching
+  `teamName`, so the check does not depend on how Claude Code serialises.
+
+### Internal
+- The toggle tests were mocking a backend named `mock`, which is not a
+  recognised backend id, so `cbm_state_backend` / `cbm_state_handle` quietly fell
+  back to legacy single-line parsing and returned the backend string as the pane
+  handle. The tests passed without exercising the code they claimed to. They now
+  mock a real backend id and parse state files for real, which is what surfaced
+  the two bugs above.
+- Test fixtures now write compact JSON, matching the real transcript format.
+
 ## [0.9.1] - 2026-08-02
 
 ### Fixed

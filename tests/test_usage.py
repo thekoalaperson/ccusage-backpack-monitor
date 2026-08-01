@@ -33,10 +33,11 @@ def msg(model, msg_id, inp=0, out=0, cache_read=0, c5=0, c1h=0, ts=None, req=Non
 
 
 def write(path, rows):
+    """Write a transcript the way Claude Code does: one compact JSON line each."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         for r in rows:
-            f.write(json.dumps(r) + "\n")
+            f.write(json.dumps(r, separators=(",", ":")) + "\n")
 
 
 class Base(unittest.TestCase):
@@ -612,22 +613,27 @@ class TestToggle(Base):
     # (3 = closed, 4 = restarted), which are successes, not failures.
     HARNESS = r'''
 . "%(lib)s/common.sh"
-cbm_backend()     { printf mock; }
+# `iterm` (a real backend id) so cbm_state_backend/cbm_state_handle parse the
+# state file for real; an unrecognised id degrades to legacy single-line mode.
+cbm_backend()     { printf iterm; }
 cbm_dispatch_ok() { return 0; }
-cbm_open_mock()   { printf 'HANDLE-NEW'; }
-cbm_alive_mock()  { [ -n "$1" ]; }
-cbm_close_mock()  { return 0; }
-cbm_pane_alive()  { cbm_alive_mock "$1"; }
-cbm_pane_close()  { cbm_close_mock "$1"; }
+cbm_open_iterm()  { printf 'HANDLE-NEW'; }
+cbm_alive_iterm() { [ -n "$1" ]; }
+cbm_close_iterm() { return 0; }
+cbm_pane_alive()  { cbm_alive_iterm "$1"; }
+cbm_pane_close()  { return 0; }
 sid=testsess; trans=/tmp/x.jsonl
 f="$(cbm_state_dir)/$sid.pane"
 %(body)s
 '''
 
-    def _sh(self, body):
+    def _sh(self, body, home=None):
         script = self.HARNESS % {"lib": os.path.abspath(LIB), "body": body}
         e = dict(os.environ)
         e["XDG_STATE_HOME"] = os.path.join(self.tmp, "state")
+        if home:
+            # so the agent-transcript lookup searches the fixture tree
+            e["HOME"] = home
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e)
         return r.stdout.strip(), r
 
@@ -644,7 +650,7 @@ cbm_toggle_pane "$sid" "$trans"; echo "rc3=$?"
     def test_stale_version_restarts_instead_of_closing(self):
         """A pane launched by an older plugin version must be replaced, not closed."""
         out, r = self._sh('''
-printf 'mock\\nHANDLE-OLD\\n/some/old/plugin/0.7.0\\n' > "$f"
+printf 'iterm\\nHANDLE-OLD\\n/some/old/plugin/0.7.0\\n' > "$f"
 cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
 echo "root=$(cbm_state_root "$f")"
 ''')
@@ -654,7 +660,7 @@ echo "root=$(cbm_state_root "$f")"
     def test_legacy_two_line_state_treated_as_stale(self):
         """State files written before version stamping have no root -> refresh."""
         out, r = self._sh('''
-printf 'mock\\nHANDLE-LEGACY\\n' > "$f"
+printf 'iterm\\nHANDLE-LEGACY\\n' > "$f"
 cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
 ''')
         self.assertIn("rc=4", out, r.stderr)
@@ -668,11 +674,53 @@ echo "root=$(cbm_state_root "$f")"
         self.assertIn("lines=3", out, r.stderr)
         self.assertIn("root=%s" % os.path.abspath(os.path.join(LIB, "..")), out)
 
+    def test_pane_keyed_under_an_agent_id_is_closed_too(self):
+        """The duplicate-pane report: resolution changed, orphaning the old pane.
+
+        Panes are keyed by session id, so a pane opened for an *agent* of this
+        session must still be recognised as this session's — otherwise opening
+        leaves the user with two panes to close by hand.
+        """
+        proj = os.path.join(self.tmp, ".claude", "projects", "p1")
+        os.makedirs(proj, exist_ok=True)
+        agent_sid = "6c245910-0000-0000-0000-000000000000"
+        write(os.path.join(proj, agent_sid + ".jsonl"),
+              [{"type": "agent-setting", "agentName": "stray",
+                "teamName": "session-testsess"},
+               msg("claude-sonnet-5", "a1", out=1000)])
+        out, r = self._sh('''
+printf 'iterm\\nHANDLE-ORPHAN\\n/old/0.8.0\\n' > "$(cbm_state_dir)/%s.pane"
+cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+ls "$(cbm_state_dir)" | grep -c pane | sed 's/^/panes=/'
+''' % agent_sid, home=self.tmp)
+        self.assertIn("rc=4", out, r.stderr)     # cleaned up + reopened
+        self.assertIn("panes=1", out, r.stderr)  # exactly one pane remains
+
+    def test_other_sessions_panes_are_left_alone(self):
+        """Several Claude sessions run side by side; don't close their monitors."""
+        out, r = self._sh('''
+printf 'iterm\\nHANDLE-OTHER\\n%s\\n' "$(cbm_plugin_root)" > "$(cbm_state_dir)/other-session.pane"
+cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+[ -f "$(cbm_state_dir)/other-session.pane" ] && echo "other=kept" || echo "other=CLOSED"
+''')
+        self.assertIn("rc=0", out, r.stderr)     # opened ours
+        self.assertIn("other=kept", out, r.stderr)
+
+    def test_dead_state_files_are_pruned(self):
+        out, r = self._sh('''
+cbm_alive_iterm() { case "$1" in HANDLE-DEAD*) return 1 ;; *) [ -n "$1" ] ;; esac; }
+printf 'iterm\\nHANDLE-DEAD-1\\n%s\\n' "$(cbm_plugin_root)" > "$(cbm_state_dir)/gone-one.pane"
+printf 'iterm\\nHANDLE-DEAD-2\\n%s\\n' "$(cbm_plugin_root)" > "$(cbm_state_dir)/gone-two.pane"
+cbm_session_panes "$sid" >/dev/null
+ls "$(cbm_state_dir)" 2>/dev/null | grep -c pane | sed 's/^/left=/'
+''')
+        self.assertIn("left=0", out, r.stderr)
+
     def test_dead_pane_reopens_rather_than_toggling_off(self):
         """If the recorded pane is gone (crash, manual close), open a fresh one."""
         out, r = self._sh('''
-cbm_alive_mock() { return 1; }
-printf 'mock\\nHANDLE-DEAD\\n%s\\n' "$(cbm_plugin_root)" > "$f"
+cbm_alive_iterm() { return 1; }
+printf 'iterm\\nHANDLE-DEAD\\n%s\\n' "$(cbm_plugin_root)" > "$f"
 cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
 ''')
         self.assertIn("rc=0", out, r.stderr)

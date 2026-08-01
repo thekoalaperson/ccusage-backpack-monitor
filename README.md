@@ -16,7 +16,7 @@ It works in **tmux**, **WezTerm**, and **iTerm2**, on **macOS and Linux**.
        alt="A live ccusage cost pane — spend, per-model breakdown, burn rate, and a tokens-per-turn sparkline — in a side pane beside a Claude Code session">
 </p>
 
-> **Status:** v0.9.1 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
+> **Status:** v0.9.2 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
 > iTerm2 (macOS). In any other terminal the hooks no-op silently, so it's safe
 > to install anywhere.
 
@@ -107,8 +107,9 @@ the **current** session: run it once to open, again to close. Plugin commands ar
 namespaced, so type `/ccusage` and let autocomplete finish it.
 
 If the open pane was started by an older version of the plugin (i.e. you upgraded
-mid-session), toggling **restarts** it on the new version instead of closing it,
-and says so. A running pane is a long-lived process, so `/plugin` + `/reload-plugins`
+mid-session), or a stray duplicate is open, toggling **replaces** them with a
+single current pane instead of closing, and says so. Panes belonging to other
+Claude sessions are left alone. A running pane is a long-lived process, so `/plugin` + `/reload-plugins`
 alone can't update it — this is how you pick up a new version without restarting
 Claude.
 
@@ -204,7 +205,7 @@ command must agree on it, so the close hook can find a pane the command opened.)
 python3 tests/test_usage.py
 ```
 
-58 fixture-based regression tests covering pricing resolution, deduplication,
+61 fixture-based regression tests covering pricing resolution, deduplication,
 subagent attribution, 5h block math, context-window handling, session
 resolution (agents are never mistaken for sessions), the open/close/restart
 toggle, and panel rendering (including an overflow check at every pane width). They build their own transcripts in a temp directory — they never read

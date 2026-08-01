@@ -59,7 +59,7 @@ cbm_toggle_pane "$sid" "$trans"
 case $? in
   0) echo "✅ Opened ccusage monitor for session ${sid:0:8}." ;;
   3) echo "◻️  Closed ccusage monitor for session ${sid:0:8}. Run it again to reopen." ;;
-  4) echo "🔄 Restarted ccusage monitor for session ${sid:0:8} on v$(cbm_plugin_version) (the open pane was running an older version)." ;;
+  4) echo "🔄 Restarted ccusage monitor for session ${sid:0:8} on v$(cbm_plugin_version) (replaced a pane that was stale or duplicated)." ;;
   *) echo "Could not open the pane (backend: $(cbm_backend)). On iTerm2, check Automation permission." ;;
 esac
 exit 0

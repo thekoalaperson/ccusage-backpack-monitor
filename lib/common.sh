@@ -102,38 +102,74 @@ cbm_state_dir() {
   printf '%s' "$d"
 }
 
+# Every live pane that belongs to session $1, one per line as
+# "<sid>\t<backend>\t<handle>\t<plugin-root>". Prunes state files whose pane is
+# gone, so crashes and manually-closed panes heal themselves.
+#
+# "Belongs to" is deliberately wider than "keyed by this session id": panes are
+# tracked per session id, so anything that changes which id we resolve to — a
+# fixed resolver, a resumed session — orphans the old pane and the next open
+# leaves the user with two. A pane following one of this session's *agents*
+# counts as this session's too.
+cbm_session_panes() {  # $1=sid
+  local state f sid be h root tr t8
+  state="$(cbm_state_dir)"
+  t8="$(printf '%s' "$1" | cut -c1-8)"
+  for f in "$state"/*.pane; do
+    [ -e "$f" ] || continue
+    sid="$(basename "$f" .pane)"
+    be="$(cbm_state_backend "$f")"
+    h="$(cbm_state_handle "$f")"
+    root="$(cbm_state_root "$f")"
+    if [ -z "$h" ] || ! cbm_pane_alive "$h" "$be"; then
+      rm -f "$f"                        # self-healing: drop dead entries
+      continue
+    fi
+    if [ "$sid" = "$1" ]; then
+      printf '%s\t%s\t%s\t%s\n' "$sid" "$be" "$h" "$root"
+      continue
+    fi
+    tr="$(find -L "$HOME/.claude/projects" -name "$sid.jsonl" 2>/dev/null | head -1)"
+    if [ -n "$tr" ] && grep -qEm1 "\"teamName\"[[:space:]]*:[[:space:]]*\"session-$t8\"" "$tr" 2>/dev/null; then
+      printf '%s\t%s\t%s\t%s\n' "$sid" "$be" "$h" "$root"
+    fi
+  done
+}
+
 # Toggle the monitor pane for a session, which is what a user pressing the same
 # command twice actually expects. Exit codes let the caller report precisely:
-#   0 opened     3 closed     4 restarted (pane predated a plugin upgrade)
+#   0 opened     3 closed     4 restarted (stale version, or duplicates cleaned)
 #   1 could not open
-# The restart case matters: a pane started before an upgrade keeps executing the
-# OLD watcher, and a plain "already open" would leave the user staring at stale
-# numbers with no hint why.
+# Panes belonging to OTHER sessions are never touched — several Claude sessions
+# commonly run side by side, each with its own monitor.
 cbm_toggle_pane() {  # $1=sid  $2=trans
   local sid="$1" trans="$2"
   [ -z "$sid" ] && return 1
 
-  local state prev pb ph pr cur
+  local state cur panes count clean psid pbe ph proot
   state="$(cbm_state_dir)"
-  prev="$state/$sid.pane"
   cur="$(cbm_plugin_root)"
+  panes="$(cbm_session_panes "$sid")"
 
-  if [ -f "$prev" ]; then
-    pb="$(cbm_state_backend "$prev")"
-    ph="$(cbm_state_handle "$prev")"
-    pr="$(cbm_state_root "$prev")"
-    if [ -n "$ph" ] && cbm_pane_alive "$ph" "$pb"; then
-      cbm_pane_close "$ph" "$pb" 2>/dev/null
-      rm -f "$prev"
-      # Same version -> the user asked to close it. Different (or unknown)
-      # version -> they asked for the monitor, so give them a current one.
-      if [ -n "$pr" ] && [ "$pr" = "$cur" ]; then
-        return 3
-      fi
-      cbm_open_pane "$sid" "$trans" || return 1
-      return 4
+  if [ -n "$panes" ]; then
+    count=0
+    clean=1
+    while IFS="$(printf '\t')" read -r psid pbe ph proot; do
+      [ -n "$ph" ] || continue
+      count=$((count + 1))
+      cbm_pane_close "$ph" "$pbe" 2>/dev/null
+      rm -f "$state/$psid.pane"
+      # Anything not on the current version, or keyed under a different id, means
+      # the user wants a working monitor rather than no monitor.
+      if [ "$proot" != "$cur" ] || [ "$psid" != "$sid" ]; then clean=0; fi
+    done <<EOF
+$panes
+EOF
+    if [ "$count" -eq 1 ] && [ "$clean" -eq 1 ]; then
+      return 3                          # a single current pane -> close it
     fi
-    rm -f "$prev"
+    cbm_open_pane "$sid" "$trans" || return 1
+    return 4                            # stale and/or duplicates -> fresh one
   fi
 
   cbm_open_pane "$sid" "$trans" || return 1
