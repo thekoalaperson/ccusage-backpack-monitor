@@ -101,7 +101,7 @@ class Scanner:
         seen = set()
         outputs = []
         hours = {}      # epoch-hour -> cost, so a rolling window can sum slices
-        team = agent = None
+        team = agent = cwd = None
         last = 0.0
         first = 0.0
         last_ctx = None
@@ -111,13 +111,14 @@ class Scanner:
                     # Cheap prefilter: most lines are user turns / tool results.
                     if '"usage"' not in line:
                         if ('"teamName"' in line or '"agentName"' in line
-                                or '"agentSetting"' in line):
+                                or '"agentSetting"' in line or ('"cwd"' in line and not cwd)):
                             try:
                                 o = json.loads(line)
                             except Exception:
                                 continue
                             team = o.get("teamName") or team
                             agent = o.get("agentName") or agent or o.get("agentSetting")
+                            cwd = cwd or o.get("cwd")
                         continue
                     try:
                         o = json.loads(line)
@@ -171,7 +172,7 @@ class Scanner:
         except OSError:
             return None
 
-        data = {"team": team, "agent": agent, "models": models,
+        data = {"team": team, "agent": agent, "cwd": cwd, "models": models,
                 "outputs": outputs[-256:], "hours": hours,
                 "first": first, "last": last, "last_ctx": last_ctx}
         self._cache["files"][path] = {"sig": sig, "data": data,
@@ -320,6 +321,164 @@ class Scanner:
         rate = total / (elapsed / 3600.0)
         return {"cost": total, "start": start, "end": end,
                 "rate": rate, "projected": rate * hours}
+
+
+def is_agent_path(path):
+    """True if `path` sits under a `subagents/` directory."""
+    parts = os.path.normpath(path).split(os.sep)
+    return "subagents" in parts
+
+
+class Resolver:
+    """Work out which session a pane should follow.
+
+    Getting this wrong is worse than showing nothing: a subagent transcript
+    rendered as a session reports one agent's spend as the whole session's, and
+    the number looks plausible enough to be believed. That is exactly what
+    happened when an agent ran with a different cwd and left its transcript at
+    the top level of another project directory.
+
+    Two rules do most of the work:
+      * a transcript carrying `teamName` is an agent, never a session;
+      * match on the `cwd` recorded *inside* transcripts rather than on a
+        path-to-directory-name transform, which is undocumented and would break
+        on paths containing spaces or other unusual characters.
+    """
+
+    def __init__(self, scanner, root=None):
+        self.scan = scanner
+        self.root = root or os.path.expanduser("~/.claude/projects")
+
+    def _all(self):
+        return list(_walk_jsonl(self.root))
+
+    def _info(self, path):
+        d = self.scan.scan_file(path)
+        if d is None:
+            return None
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return None
+        return {"path": path, "sid": os.path.basename(path)[:-6],
+                "team": d.get("team"), "cwd": d.get("cwd"),
+                "agent": bool(d.get("team")) or is_agent_path(path),
+                "mtime": mtime}
+
+    def find_by_sid(self, sid):
+        for p in self._all():
+            if os.path.basename(p) == sid + ".jsonl":
+                return p
+        return None
+
+    def parent_of(self, info):
+        """Given an agent transcript, the session that spawned it."""
+        team = info.get("team") or ""
+        if team.startswith("session-"):
+            prefix = team[len("session-"):]
+            best = None
+            for p in self._all():
+                base = os.path.basename(p)[:-6]
+                if base.startswith(prefix) and not is_agent_path(p):
+                    i = self._info(p)
+                    if i and not i["team"]:
+                        if best is None or i["mtime"] > best["mtime"]:
+                            best = i
+            return best
+        # Nested layout: <project>/<parent-sid>/subagents/...
+        parts = os.path.normpath(info["path"]).split(os.sep)
+        if "subagents" in parts:
+            idx = parts.index("subagents")
+            if idx >= 1:
+                cand = os.sep.join(parts[:idx]) + ".jsonl"
+                if os.path.exists(cand):
+                    return self._info(cand)
+        return None
+
+    def session_ancestor(self, info, max_depth=8):
+        """Walk up from an agent to the real session at the top of its chain.
+
+        Agents spawn agents (a workflow's coordinator is itself an agent), so a
+        single hop can land on another agent. And a chain can be broken — an
+        agent whose parent transcript has been deleted has no session, and
+        saying so is better than returning the nearest agent as if it were one.
+        """
+        seen = set()
+        cur = info
+        for _ in range(max_depth):
+            parent = self.parent_of(cur)
+            if not parent:
+                return None
+            if parent["path"] in seen:      # defensive: never loop
+                return None
+            seen.add(parent["path"])
+            if not parent["agent"]:
+                return parent
+            cur = parent
+        return None
+
+    def resolve(self, pwd=None, sid=None):
+        """-> (sid, transcript_path) or (None, None).
+
+        Preference order: an explicitly supplied session id; a real session
+        whose recorded cwd matches `pwd`; the most recent real session anywhere;
+        finally, the parent of the most recent agent transcript.
+        """
+        if sid:
+            p = self.find_by_sid(sid)
+            if p:
+                return sid, p
+
+        infos = [i for i in (self._info(p) for p in self._all()) if i]
+        sessions = [i for i in infos if not i["agent"]]
+
+        agents = [i for i in infos if i["agent"]]
+
+        if pwd:
+            pwd = os.path.normpath(pwd)
+
+            # 1. A real session started in exactly this directory.
+            exact = [i for i in sessions
+                     if i["cwd"] and os.path.normpath(i["cwd"]) == pwd]
+            if exact:
+                best = max(exact, key=lambda i: i["mtime"])
+                return best["sid"], best["path"]
+
+            # 2. No session here, but an agent ran here -> follow it home. This
+            #    is deterministic; falling through to "newest session anywhere"
+            #    would answer with whichever unrelated session was written last.
+            agent_here = [i for i in agents
+                          if i["cwd"] and os.path.normpath(i["cwd"]) == pwd]
+            for cand in sorted(agent_here, key=lambda i: -i["mtime"]):
+                parent = self.session_ancestor(cand)
+                if parent:
+                    return parent["sid"], parent["path"]
+
+            # 3. A session started in the nearest ancestor directory. Claude
+            #    records the directory it started in, so working deeper in the
+            #    tree still belongs to that session.
+            anc = []
+            for i in sessions:
+                if not i["cwd"]:
+                    continue
+                c = os.path.normpath(i["cwd"])
+                if pwd.startswith(c + os.sep):
+                    anc.append((len(c), i["mtime"], i))
+            if anc:
+                anc.sort(key=lambda t: (t[0], t[1]), reverse=True)
+                best = anc[0][2]
+                return best["sid"], best["path"]
+
+        # 4. Last resort: the most recently active session anywhere.
+        if sessions:
+            best = max(sessions, key=lambda i: i["mtime"])
+            return best["sid"], best["path"]
+
+        for cand in sorted(agents, key=lambda i: -i["mtime"]):
+            parent = self.session_ancestor(cand)
+            if parent:
+                return parent["sid"], parent["path"]
+        return None, None
 
 
 def _walk_jsonl(root):

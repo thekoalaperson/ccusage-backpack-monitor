@@ -386,6 +386,222 @@ class TestRender(Base):
         self.assertNotIn("out/turn", r.stdout)
 
 
+class TestResolver(Base):
+    """Which session does a pane follow?
+
+    Every case here is a way to show a confidently wrong number. A subagent
+    transcript rendered as a session reports one agent's spend as the whole
+    session's, which is plausible enough to be believed and quietly wrong.
+    """
+
+    def setUp(self):
+        super(TestResolver, self).setUp()
+        from usage import Resolver
+        self.res = Resolver(self.scan, root=self.projects)
+
+    def _session(self, proj, sid, cwd, rows=None, mtime=None):
+        p = os.path.join(self.projects, proj, sid + ".jsonl")
+        rows = rows or [msg("claude-opus-5", "m-" + sid, out=1000)]
+        write(p, [{"type": "user", "cwd": cwd, "sessionId": sid}] + rows)
+        if mtime:
+            os.utime(p, (mtime, mtime))
+        return p
+
+    def _agent(self, proj, parent_sid, name, cwd, nested=True, mtime=None):
+        if nested:
+            p = os.path.join(self.projects, proj, parent_sid, "subagents",
+                             "agent-%s.jsonl" % name)
+        else:                       # ran with a different cwd -> sibling project
+            p = os.path.join(self.projects, proj, "ag%s-0000-0000" % name + ".jsonl")
+        write(p, [{"type": "agent-setting", "agentName": name, "cwd": cwd,
+                   "teamName": "session-" + parent_sid[:8]},
+                  msg("claude-sonnet-5", "a-" + name, out=500)])
+        if mtime:
+            os.utime(p, (mtime, mtime))
+        return p
+
+    def test_normal_single_session(self):
+        self._session("p1", "aaaa1111-0000-0000-0000-000000000000", "/work/one")
+        sid, path = self.res.resolve(pwd="/work/one")
+        self.assertTrue(sid.startswith("aaaa1111"))
+
+    def test_agent_in_same_dir_is_not_chosen(self):
+        """An agent transcript must never win over a real session."""
+        now = time.time()
+        self._session("p1", "aaaa1111-0000-0000-0000-000000000000", "/work/one",
+                      mtime=now - 100)
+        self._agent("p1", "aaaa1111-0000-0000-0000-000000000000", "helper",
+                    "/work/one", nested=False, mtime=now)   # newer!
+        sid, _ = self.res.resolve(pwd="/work/one")
+        self.assertTrue(sid.startswith("aaaa1111"), "picked the agent: %s" % sid)
+
+    def test_only_agent_present_resolves_to_parent(self):
+        """The reported bug: agent ran with a different cwd, alone in that dir."""
+        parent = "bbbb2222-0000-0000-0000-000000000000"
+        self._session("home", parent, "/work/home")
+        self._agent("elsewhere", parent, "researcher", "/work/elsewhere",
+                    nested=False)
+        sid, path = self.res.resolve(pwd="/work/elsewhere")
+        self.assertTrue(sid.startswith("bbbb2222"),
+                        "should follow the agent home to its session, got %s" % sid)
+        self.assertNotIn("subagents", path)
+
+    def test_nested_subagents_never_chosen(self):
+        parent = "cccc3333-0000-0000-0000-000000000000"
+        self._session("p1", parent, "/work/one")
+        self._agent("p1", parent, "nested", "/work/one", nested=True,
+                    mtime=time.time() + 50)
+        sid, path = self.res.resolve(pwd="/work/one")
+        self.assertTrue(sid.startswith("cccc3333"))
+        self.assertNotIn("subagents", path)
+
+    def test_cwd_match_beats_newer_session_elsewhere(self):
+        now = time.time()
+        self._session("p1", "aaaa1111-0000-0000-0000-000000000000", "/work/one",
+                      mtime=now - 500)
+        self._session("p2", "dddd4444-0000-0000-0000-000000000000", "/work/two",
+                      mtime=now)          # newer, but wrong directory
+        sid, _ = self.res.resolve(pwd="/work/one")
+        self.assertTrue(sid.startswith("aaaa1111"))
+
+    def test_two_sessions_same_cwd_picks_most_recent(self):
+        now = time.time()
+        self._session("p1", "aaaa1111-0000-0000-0000-000000000000", "/work/one",
+                      mtime=now - 500)
+        self._session("p1", "eeee5555-0000-0000-0000-000000000000", "/work/one",
+                      mtime=now)
+        sid, _ = self.res.resolve(pwd="/work/one")
+        self.assertTrue(sid.startswith("eeee5555"))
+
+    def test_unknown_cwd_falls_back_to_newest_session(self):
+        now = time.time()
+        self._session("p1", "aaaa1111-0000-0000-0000-000000000000", "/work/one",
+                      mtime=now - 500)
+        self._session("p2", "dddd4444-0000-0000-0000-000000000000", "/work/two",
+                      mtime=now)
+        sid, _ = self.res.resolve(pwd="/somewhere/never/seen")
+        self.assertTrue(sid.startswith("dddd4444"))
+
+    def test_no_transcripts_at_all(self):
+        sid, path = self.res.resolve(pwd="/work/one")
+        self.assertIsNone(sid)
+        self.assertIsNone(path)
+
+    def test_explicit_session_id_wins(self):
+        self._session("p1", "aaaa1111-0000-0000-0000-000000000000", "/work/one")
+        self._session("p2", "dddd4444-0000-0000-0000-000000000000", "/work/two")
+        sid, _ = self.res.resolve(pwd="/work/one",
+                                  sid="dddd4444-0000-0000-0000-000000000000")
+        self.assertTrue(sid.startswith("dddd4444"))
+
+    def test_cwd_with_spaces_and_unicode(self):
+        """Path-to-directory-name transforms are undocumented; cwd matching isn't."""
+        odd = "/Users/x/Idea Chest/proj (v2)/café"
+        self._session("weird", "ffff6666-0000-0000-0000-000000000000", odd)
+        sid, _ = self.res.resolve(pwd=odd)
+        self.assertTrue(sid.startswith("ffff6666"))
+
+    def test_trailing_slash_and_dotsegments_normalise(self):
+        self._session("p1", "aaaa1111-0000-0000-0000-000000000000", "/work/one")
+        for variant in ("/work/one/", "/work/./one", "/work/two/../one"):
+            sid, _ = self.res.resolve(pwd=variant)
+            self.assertTrue(sid and sid.startswith("aaaa1111"),
+                            "failed to normalise %r" % variant)
+
+    def test_orphan_agent_does_not_crash(self):
+        """Agent whose parent transcript is gone: degrade, don't explode."""
+        self._agent("p1", "99999999-0000-0000-0000-000000000000", "orphan",
+                    "/work/one", nested=False)
+        sid, path = self.res.resolve(pwd="/work/one")
+        self.assertIsNone(sid)      # no session to point at, and that's honest
+
+    def test_nested_orphan_resolves_by_path(self):
+        """No teamName, but the directory layout still names the parent."""
+        parent = "cccc3333-0000-0000-0000-000000000000"
+        self._session("p1", parent, "/work/one")
+        p = os.path.join(self.projects, "p1", parent, "subagents", "agent-x.jsonl")
+        write(p, [msg("claude-sonnet-5", "nx", out=500)])   # no teamName at all
+        info = self.res._info(p)
+        self.assertTrue(info["agent"], "path under subagents/ must count as an agent")
+        parent_info = self.res.parent_of(info)
+        self.assertIsNotNone(parent_info)
+        self.assertTrue(parent_info["sid"].startswith("cccc3333"))
+
+    def test_agent_of_agent_walks_up_to_the_real_session(self):
+        """A workflow coordinator is itself an agent, so one hop isn't enough."""
+        session = "aaaa1111-0000-0000-0000-000000000000"
+        mid = "bbbb2222-0000-0000-0000-000000000000"
+        self._session("p1", session, "/work/top")
+        # mid is an agent OF the session, and has its own children
+        write(os.path.join(self.projects, "p2", mid + ".jsonl"),
+              [{"type": "agent-setting", "agentName": "coordinator",
+                "cwd": "/work/deep", "teamName": "session-" + session[:8]},
+               msg("claude-opus-5", "mid1", out=1000)])
+        write(os.path.join(self.projects, "p2", mid, "subagents", "agent-leaf.jsonl"),
+              [{"type": "agent-setting", "agentName": "leaf", "cwd": "/work/deep"},
+               msg("claude-sonnet-5", "leaf1", out=1000)])
+        sid, path = self.res.resolve(pwd="/work/deep")
+        self.assertTrue(sid.startswith("aaaa1111"),
+                        "should climb past the intermediate agent, got %s" % sid)
+        self.assertFalse(self.res._info(path)["agent"])
+
+    def test_broken_parent_chain_never_returns_an_agent(self):
+        """Parent transcript deleted: prefer an honest fallback over an agent."""
+        orphan = "bbbb2222-0000-0000-0000-000000000000"
+        # session at an ancestor directory, so there IS a sane answer
+        self._session("p1", "aaaa1111-0000-0000-0000-000000000000", "/work")
+        write(os.path.join(self.projects, "p2", orphan + ".jsonl"),
+              [{"type": "agent-setting", "agentName": "stranded", "cwd": "/work/deep",
+                "teamName": "session-deadbeef"},          # parent does not exist
+               msg("claude-opus-5", "o1", out=1000)])
+        write(os.path.join(self.projects, "p2", orphan, "subagents", "agent-c.jsonl"),
+              [{"type": "agent-setting", "agentName": "child", "cwd": "/work/deep"},
+               msg("claude-sonnet-5", "c1", out=1000)])
+        sid, path = self.res.resolve(pwd="/work/deep")
+        self.assertIsNotNone(sid)
+        self.assertFalse(self.res._info(path)["agent"],
+                         "resolved to an agent: %s" % sid)
+        self.assertTrue(sid.startswith("aaaa1111"))
+
+    def test_parent_chain_cycle_terminates(self):
+        """Two agents naming each other must not hang the resolver."""
+        a = "aaaa1111-0000-0000-0000-000000000000"
+        b = "bbbb2222-0000-0000-0000-000000000000"
+        write(os.path.join(self.projects, "p1", a + ".jsonl"),
+              [{"type": "agent-setting", "agentName": "a", "cwd": "/w",
+                "teamName": "session-" + b[:8]}, msg("claude-opus-5", "a1", out=10)])
+        write(os.path.join(self.projects, "p1", b + ".jsonl"),
+              [{"type": "agent-setting", "agentName": "b", "cwd": "/w",
+                "teamName": "session-" + a[:8]}, msg("claude-opus-5", "b1", out=10)])
+        sid, path = self.res.resolve(pwd="/w")     # must return, not spin
+        self.assertIsNone(sid)
+
+    def test_missing_projects_root(self):
+        from usage import Resolver
+        r = Resolver(self.scan, root=os.path.join(self.tmp, "does-not-exist"))
+        sid, path = r.resolve(pwd="/work/one")
+        self.assertIsNone(sid)
+
+
+class TestAgentLabelling(Base):
+    def test_agent_transcript_is_labelled_not_disguised(self):
+        """If an agent is ever rendered, it must not read as the session."""
+        parent = "bbbb2222-0000-0000-0000-000000000000"
+        p = os.path.join(self.projects, "p1", "agent-strays.jsonl")
+        write(p, [{"type": "agent-setting", "agentName": "pixverse-research",
+                   "teamName": "session-" + parent[:8]},
+                  msg("claude-sonnet-5", "a1", out=1_000_000)])
+        e = dict(os.environ)
+        e["CBM_NO_NETWORK"] = "1"
+        e["COLUMNS"] = "60"
+        r = subprocess.run([sys.executable, os.path.join(LIB, "render.py"),
+                            "agent-strays", p], capture_output=True, text=True, env=e)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("agent", r.stdout)
+        self.assertIn("pixverse-research", r.stdout)
+        self.assertIn(parent[:8], r.stdout)
+
+
 class TestToggle(Base):
     """The slash command's open/close/restart state machine (lib/common.sh).
 
