@@ -4,6 +4,42 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-08-01
+
+Follow-up to 0.8.0, driven by using it: the slash command didn't behave the way
+anyone expects, and the panel broke at the pane size the default config produces.
+
+### Added
+- **`/ccusage-monitor` is now a toggle.** Run it once to open, again to close.
+  Previously it only ever opened, and a second run printed "already open" and did
+  nothing — which was also the *only* feedback you got when the open pane was
+  running a **older** version of the plugin after an upgrade.
+- **Version-aware restart.** The pane's state file now records the plugin root
+  that launched it. If you toggle a pane that predates an upgrade, it is replaced
+  rather than closed, and the message says so. State files written before this
+  release have no version recorded and are treated as stale, so the first toggle
+  after upgrading refreshes the pane.
+- **Context-window gauge.** `ctx ██████···· 58%  577K/1.0M` from the last turn's
+  input side (fresh + cached tokens). The percentage is shown **only** when the
+  model's window is actually known — for an unrecognised model the raw token
+  count is shown instead, rather than a percentage against a guessed window.
+- **`NO_COLOR` support** (no-color.org) for plain terminals, piped output, and
+  logs. `CBM_BG` still forces color, since it implies a styled card.
+- `CBM_CONTEXT=0` hides the context gauge.
+
+### Fixed
+- **The panel no longer wraps in a narrow pane.** Width had a hard floor of 40
+  columns, so anything narrower wrapped every model row — and the default
+  `CBM_SIZE=25` produces a 30-column pane on a 120-column terminal, so this hit
+  default configs, not edge cases. The layout now drops fields in order of
+  importance and hard-clips as a last resort; verified overflow-free from 8 to
+  120 columns with deliberately hostile content (five-figure costs, 50-character
+  model and agent names).
+- Large costs are formatted compactly in model and agent rows (`$21.9k`), so they
+  can no longer be truncated mid-number.
+- **The scan cache is bounded** (600 entries, least-recently-used evicted). It
+  previously only pruned deleted files and had reached 571 entries / 343 KB.
+
 ## [0.8.0] - 2026-08-01
 
 The panel now reads Claude Code's transcripts directly instead of shelling out

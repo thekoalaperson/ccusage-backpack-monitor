@@ -16,7 +16,7 @@ It works in **tmux**, **WezTerm**, and **iTerm2**, on **macOS and Linux**.
        alt="A live ccusage cost pane — spend, per-model breakdown, burn rate, and a tokens-per-turn sparkline — in a side pane beside a Claude Code session">
 </p>
 
-> **Status:** v0.8.0 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
+> **Status:** v0.9.0 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
 > iTerm2 (macOS). In any other terminal the hooks no-op silently, so it's safe
 > to install anywhere.
 
@@ -102,9 +102,15 @@ Point the marketplace at a local checkout instead of GitHub:
 
 ## Commands
 
-`/ccusage-backpack-monitor:ccusage-monitor` — open the monitor pane for the
-**current** session on demand (handy if it isn't open, or you closed it). Plugin
-commands are namespaced, so type `/ccusage` and let autocomplete finish it.
+`/ccusage-backpack-monitor:ccusage-monitor` — **toggles** the monitor pane for
+the **current** session: run it once to open, again to close. Plugin commands are
+namespaced, so type `/ccusage` and let autocomplete finish it.
+
+If the open pane was started by an older version of the plugin (i.e. you upgraded
+mid-session), toggling **restarts** it on the new version instead of closing it,
+and says so. A running pane is a long-lived process, so `/plugin` + `/reload-plugins`
+alone can't update it — this is how you pick up a new version without restarting
+Claude.
 
 ## Configuration
 
@@ -120,6 +126,8 @@ Set these as environment variables before launching `claude`:
 | `CBM_BLOCKS`         | `1`           | `0` hides the 5h burn-rate/projection section        |
 | `CBM_AGENTS`         | `1`           | `0` hides the subagent breakdown                     |
 | `CBM_GRAPH`          | `1`           | `0` hides the sparkline                              |
+| `CBM_CONTEXT`        | `1`           | `0` hides the context-window gauge                   |
+| `NO_COLOR`           | _(unset)_     | Set (any value) to disable ANSI color entirely ([no-color.org](https://no-color.org)). `CBM_BG` overrides it. |
 | `CBM_NO_NETWORK`     | _(unset)_     | `1` pins pricing to the bundled table (no daily refresh) |
 | `CBM_BG`             | _(unset)_     | A 256-color index (e.g. `234`) paints an opaque background card behind the panel — useful in **transparent terminals**. Unset = solid high-contrast text, no fill. |
 
@@ -127,6 +135,14 @@ The panel shows **every model used in the session** — including those used by
 subagents — with its own cost, a cost-share bar, and token count. When a session
 spawned agents, the header splits the total into what you spent directly versus
 what your agents spent, and an `AGENTS` section lists the biggest ones.
+
+A **context gauge** (`ctx ██████···· 58%  577K/1.0M`) shows how full the window is,
+taken from the last turn's input side. The percentage appears only when the
+model's context window is actually known; for an unrecognised model the raw token
+count is shown instead of a percentage against a guessed window.
+
+The layout **adapts to the pane width** — fields are dropped in order of
+importance, so a 24-column pane degrades gracefully instead of wrapping.
 
 ### Pricing
 
@@ -187,10 +203,11 @@ command must agree on it, so the close hook can find a pane the command opened.)
 python3 tests/test_usage.py
 ```
 
-28 fixture-based regression tests covering pricing resolution, deduplication,
-subagent attribution, 5h block math, and panel rendering. They build their own
-transcripts in a temp directory — they never read your real usage data and never
-touch the network.
+40 fixture-based regression tests covering pricing resolution, deduplication,
+subagent attribution, 5h block math, context-window handling, the open/close/
+restart toggle, and panel rendering (including an overflow check at every pane
+width). They build their own transcripts in a temp directory — they never read
+your real usage data and never touch the network.
 
 ## Roadmap
 

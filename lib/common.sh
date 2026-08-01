@@ -102,6 +102,44 @@ cbm_state_dir() {
   printf '%s' "$d"
 }
 
+# Toggle the monitor pane for a session, which is what a user pressing the same
+# command twice actually expects. Exit codes let the caller report precisely:
+#   0 opened     3 closed     4 restarted (pane predated a plugin upgrade)
+#   1 could not open
+# The restart case matters: a pane started before an upgrade keeps executing the
+# OLD watcher, and a plain "already open" would leave the user staring at stale
+# numbers with no hint why.
+cbm_toggle_pane() {  # $1=sid  $2=trans
+  local sid="$1" trans="$2"
+  [ -z "$sid" ] && return 1
+
+  local state prev pb ph pr cur
+  state="$(cbm_state_dir)"
+  prev="$state/$sid.pane"
+  cur="$(cbm_plugin_root)"
+
+  if [ -f "$prev" ]; then
+    pb="$(cbm_state_backend "$prev")"
+    ph="$(cbm_state_handle "$prev")"
+    pr="$(cbm_state_root "$prev")"
+    if [ -n "$ph" ] && cbm_pane_alive "$ph" "$pb"; then
+      cbm_pane_close "$ph" "$pb" 2>/dev/null
+      rm -f "$prev"
+      # Same version -> the user asked to close it. Different (or unknown)
+      # version -> they asked for the monitor, so give them a current one.
+      if [ -n "$pr" ] && [ "$pr" = "$cur" ]; then
+        return 3
+      fi
+      cbm_open_pane "$sid" "$trans" || return 1
+      return 4
+    fi
+    rm -f "$prev"
+  fi
+
+  cbm_open_pane "$sid" "$trans" || return 1
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Backend resolution + dispatch
 # ---------------------------------------------------------------------------
@@ -156,8 +194,29 @@ cbm_dispatch_ok() {  # $1=op (open|alive|close)  $2=backend
 # must close via the RECORDED backend, never by re-detecting. Pre-0.6 files were
 # a single line (a bare iTerm session id) — those are read as backend=iterm.
 # ---------------------------------------------------------------------------
-cbm_state_write() {  # $1=path $2=backend $3=handle
-  printf '%s\n%s\n' "$2" "$3" > "$1"
+cbm_state_write() {  # $1=path $2=backend $3=handle [$4=plugin root]
+  printf '%s\n%s\n%s\n' "$2" "$3" "${4:-$(cbm_plugin_root)}" > "$1"
+}
+
+# Absolute path of the plugin directory that owns this common.sh. Under the
+# marketplace cache this path contains the version, so comparing it to the
+# recorded one tells us whether a running pane predates an upgrade.
+cbm_plugin_root() {
+  (cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)
+}
+
+# Version string for user-facing messages. Read from plugin.json without needing
+# python or jq, so it works in the same stripped environments the hooks run in.
+cbm_plugin_version() {
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$(cbm_plugin_root)/.claude-plugin/plugin.json" 2>/dev/null | head -1
+}
+
+# Third line of the state file: the plugin root the pane was launched from.
+# Empty for state files written before v0.9.0, which we treat as "unknown" and
+# therefore stale, so the first toggle after upgrading refreshes the pane.
+cbm_state_root() {  # $1=path -> plugin root or empty
+  sed -n 3p "$1" 2>/dev/null
 }
 cbm_state_backend() {  # $1=path -> backend id (legacy single-line => iterm)
   local first second

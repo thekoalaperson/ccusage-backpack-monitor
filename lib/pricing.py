@@ -40,6 +40,28 @@ BUNDLED = {
     "claude-3-haiku":    (0.25,  1.25),
 }
 
+# Context window (max input tokens) per model, for the usage gauge. Same
+# resolution order as rates; the refreshed snapshot carries `max_input_tokens`.
+CONTEXT = {
+    "claude-opus-5":     1000000,
+    "claude-opus-4-8":   1000000,
+    "claude-opus-4-7":   1000000,
+    "claude-opus-4-6":   1000000,
+    "claude-opus-4-5":    200000,
+    "claude-opus-4-1":    200000,
+    "claude-opus-4":      200000,
+    "claude-fable-5":    1000000,
+    "claude-mythos-5":   1000000,
+    "claude-sonnet-5":   1000000,
+    "claude-sonnet-4-6": 1000000,
+    "claude-sonnet-4-5":  200000,
+    "claude-sonnet-4":    200000,
+    "claude-haiku-4-5":   200000,
+    "claude-3-5-haiku":   200000,
+    "claude-3-haiku":     200000,
+}
+DEFAULT_CONTEXT = 200000
+
 # Family fallback for a model we have never heard of. Better than $0.00: the
 # panel marks these estimated so the number is never silently trusted.
 FAMILY = (
@@ -122,6 +144,8 @@ def _refresh_if_stale(path):
                          ("cache_creation_input_token_cost_above_1hr", "cache_1h")):
             if e.get(src):
                 rec[dst] = e[src] * 1e6
+        if e.get("max_input_tokens"):
+            rec["context"] = e["max_input_tokens"]
         slim[name] = rec
     if not slim:
         return
@@ -228,6 +252,32 @@ class Pricing:
         if usage.get("speed") == "fast":
             total *= 2.0
         return total / 1e6
+
+    def context_window(self, model):
+        """Max input tokens for `model`, for the context gauge.
+
+        Falls back to the smallest common window rather than a large one, so a
+        model we don't know reads as *fuller* than it is — erring toward warning
+        the user early rather than reassuring them wrongly.
+        """
+        model = model or ""
+        for table in (self.overrides, self.snapshot):
+            v = table.get(model)
+            if isinstance(v, dict) and v.get("context"):
+                return int(v["context"])
+        if model in CONTEXT:
+            return CONTEXT[model]
+        base = model
+        parts = model.rsplit("-", 1)
+        if len(parts) == 2 and len(parts[1]) == 8 and parts[1].isdigit():
+            base = parts[0]
+            if base in CONTEXT:
+                return CONTEXT[base]
+        best = None
+        for known in CONTEXT:
+            if base.startswith(known) and (best is None or len(known) > len(best)):
+                best = known
+        return CONTEXT[best] if best else DEFAULT_CONTEXT
 
     def is_exact(self, model):
         r = self.rates(model)

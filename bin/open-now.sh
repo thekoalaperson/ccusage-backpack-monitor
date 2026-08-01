@@ -37,12 +37,13 @@ if [ -z "$sid" ]; then
   exit 0
 fi
 
-# cbm_open_pane is idempotent and reports the outcome via its exit code, so we
-# need no separate pane-alive queries here.
-cbm_open_pane "$sid" "$trans"
+# Toggle: run it once to open, again to close. cbm_toggle_pane reports the
+# outcome via its exit code, so no separate pane-alive queries are needed here.
+cbm_toggle_pane "$sid" "$trans"
 case $? in
   0) echo "✅ Opened ccusage monitor for session ${sid:0:8}." ;;
-  2) echo "ccusage monitor already open for session ${sid:0:8}." ;;
+  3) echo "◻️  Closed ccusage monitor for session ${sid:0:8}. Run it again to reopen." ;;
+  4) echo "🔄 Restarted ccusage monitor for session ${sid:0:8} on v$(cbm_plugin_version) (the open pane was running an older version)." ;;
   *) echo "Could not open the pane (backend: $(cbm_backend)). On iTerm2, check Automation permission." ;;
 esac
 exit 0
