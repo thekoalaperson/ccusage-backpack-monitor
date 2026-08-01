@@ -7,7 +7,7 @@ on any machine.
 
 Run:  python3 tests/test_usage.py
 """
-import json, os, shutil, subprocess, sys, tempfile, time, unittest
+import json, os, re, shutil, subprocess, sys, tempfile, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIB = os.path.join(HERE, "..", "lib")
@@ -109,6 +109,15 @@ class TestPricing(Base):
         u["speed"] = "fast"
         self.assertAlmostEqual(self.pricing.cost("claude-opus-5", u), base * 2, places=6)
 
+    def test_context_windows(self):
+        self.assertEqual(self.pricing.context_window("claude-opus-5"), 1000000)
+        self.assertEqual(self.pricing.context_window("claude-haiku-4-5"), 200000)
+        self.assertEqual(self.pricing.context_window("claude-haiku-4-5-20251001"), 200000)
+
+    def test_unknown_context_window_errs_small(self):
+        """An unknown model should read as fuller, not emptier, than reality."""
+        self.assertEqual(self.pricing.context_window("claude-brandnew-9"), 200000)
+
     def test_user_override_wins(self):
         cfg = os.path.join(self.tmp, "config", "ccusage-backpack-monitor")
         os.makedirs(cfg, exist_ok=True)
@@ -207,6 +216,32 @@ class TestScanner(Base):
             "s5", [msg("<synthetic>", "m1", out=1_000_000)]))
         self.assertAlmostEqual(d["models"]["<synthetic>"]["cost"], 0.0, places=6)
 
+    def test_context_is_last_turn_input_side(self):
+        """Context = what the model read (fresh + cached), not what it wrote."""
+        rows = [msg("claude-opus-5", "m1", inp=10, cache_read=10, out=999),
+                msg("claude-opus-5", "m2", inp=1000, cache_read=200_000,
+                    c1h=5_000, out=999)]
+        d = self.scan.scan_file(self._session("s6", rows))
+        model, ctx = d["last_ctx"]
+        self.assertEqual(model, "claude-opus-5")
+        self.assertEqual(ctx, 1000 + 200_000 + 5_000)   # output excluded
+
+    def test_scan_cache_is_bounded(self):
+        import usage as u
+        original = u.SCAN_CACHE_MAX
+        u.SCAN_CACHE_MAX = 5
+        try:
+            for i in range(12):
+                self.scan.scan_file(self._session(
+                    "bulk%d" % i, [msg("claude-opus-5", "m%d" % i, out=1000)]))
+            self.scan.save()
+            with open(os.path.join(self.tmp, "state",
+                                   "ccusage-backpack-monitor", "scan-cache.json")) as f:
+                saved = json.load(f)
+            self.assertLessEqual(len(saved["files"]), 5)
+        finally:
+            u.SCAN_CACHE_MAX = original
+
 
 class TestActiveBlock(Base):
     def _at(self, hours_ago):
@@ -296,6 +331,49 @@ class TestRender(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("estimated", r.stdout)
 
+    def test_context_gauge_rendered(self):
+        sid = "abc12345-0000-0000-0000-000000000000"
+        path = os.path.join(self.projects, "proj", sid + ".jsonl")
+        # 500K of a 1M window -> 50%
+        write(path, [msg("claude-opus-5", "m1", cache_read=500_000, out=100)])
+        r = self._run(sid, path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ctx", r.stdout)
+        self.assertIn("50%", r.stdout)
+
+    def test_no_color_emits_no_ansi(self):
+        sid = "abc12345-0000-0000-0000-000000000000"
+        path = os.path.join(self.projects, "proj", sid + ".jsonl")
+        write(path, [msg("claude-opus-5", "m1", out=1_000_000)])
+        r = self._run(sid, path, {"NO_COLOR": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("\033[", r.stdout)
+        self.assertIn("$25.00", r.stdout)      # content still present
+
+    def test_no_line_overflows_pane_width(self):
+        """A narrow pane must degrade, not wrap. CBM_SIZE=25 makes this common."""
+        import unicodedata
+        sid = "abc12345-0000-0000-0000-000000000000"
+        path = os.path.join(self.projects, "proj", sid + ".jsonl")
+        write(path, [msg("claude-fable-5", "m1", inp=50_000, out=9_000,
+                         cache_read=400_000, c1h=60_000)])
+        write(os.path.join(self.projects, "proj", sid, "subagents", "agent-a.jsonl"),
+              [{"type": "agent-setting", "agentName": "a-very-long-agent-name"},
+               msg("claude-sonnet-5", "s1", out=1_000_000)])
+        ansi = re.compile(r"\033\[[0-9;]*m")
+
+        def width(s):
+            s = ansi.sub("", s)
+            return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+
+        for cols in (20, 24, 30, 34, 40, 46, 60, 72):
+            r = self._run(sid, path, {"COLUMNS": str(cols)})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for ln in r.stdout.splitlines():
+                self.assertLessEqual(
+                    width(ln), cols,
+                    "line overflows at COLUMNS=%d: %r" % (cols, ansi.sub("", ln)))
+
     def test_toggles_hide_sections(self):
         sid = "abc12345-0000-0000-0000-000000000000"
         path = os.path.join(self.projects, "proj", sid + ".jsonl")
@@ -306,6 +384,82 @@ class TestRender(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("AGENTS", r.stdout)
         self.assertNotIn("out/turn", r.stdout)
+
+
+class TestToggle(Base):
+    """The slash command's open/close/restart state machine (lib/common.sh).
+
+    Runs against a mocked backend so no real terminal panes are created.
+    """
+
+    # No `set -e`: cbm_toggle_pane signals outcomes through non-zero exit codes
+    # (3 = closed, 4 = restarted), which are successes, not failures.
+    HARNESS = r'''
+. "%(lib)s/common.sh"
+cbm_backend()     { printf mock; }
+cbm_dispatch_ok() { return 0; }
+cbm_open_mock()   { printf 'HANDLE-NEW'; }
+cbm_alive_mock()  { [ -n "$1" ]; }
+cbm_close_mock()  { return 0; }
+cbm_pane_alive()  { cbm_alive_mock "$1"; }
+cbm_pane_close()  { cbm_close_mock "$1"; }
+sid=testsess; trans=/tmp/x.jsonl
+f="$(cbm_state_dir)/$sid.pane"
+%(body)s
+'''
+
+    def _sh(self, body):
+        script = self.HARNESS % {"lib": os.path.abspath(LIB), "body": body}
+        e = dict(os.environ)
+        e["XDG_STATE_HOME"] = os.path.join(self.tmp, "state")
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e)
+        return r.stdout.strip(), r
+
+    def test_open_then_close_then_open(self):
+        out, r = self._sh('''
+cbm_toggle_pane "$sid" "$trans"; echo "rc1=$?"
+cbm_toggle_pane "$sid" "$trans"; echo "rc2=$?"
+cbm_toggle_pane "$sid" "$trans"; echo "rc3=$?"
+''')
+        self.assertIn("rc1=0", out, r.stderr)   # opened
+        self.assertIn("rc2=3", out, r.stderr)   # closed
+        self.assertIn("rc3=0", out, r.stderr)   # opened again
+
+    def test_stale_version_restarts_instead_of_closing(self):
+        """A pane launched by an older plugin version must be replaced, not closed."""
+        out, r = self._sh('''
+printf 'mock\\nHANDLE-OLD\\n/some/old/plugin/0.7.0\\n' > "$f"
+cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+echo "root=$(cbm_state_root "$f")"
+''')
+        self.assertIn("rc=4", out, r.stderr)
+        self.assertNotIn("/some/old/plugin/0.7.0", out)
+
+    def test_legacy_two_line_state_treated_as_stale(self):
+        """State files written before version stamping have no root -> refresh."""
+        out, r = self._sh('''
+printf 'mock\\nHANDLE-LEGACY\\n' > "$f"
+cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+''')
+        self.assertIn("rc=4", out, r.stderr)
+
+    def test_state_file_records_plugin_root(self):
+        out, r = self._sh('''
+cbm_toggle_pane "$sid" "$trans" >/dev/null
+echo "lines=$(wc -l < "$f" | tr -d ' ')"
+echo "root=$(cbm_state_root "$f")"
+''')
+        self.assertIn("lines=3", out, r.stderr)
+        self.assertIn("root=%s" % os.path.abspath(os.path.join(LIB, "..")), out)
+
+    def test_dead_pane_reopens_rather_than_toggling_off(self):
+        """If the recorded pane is gone (crash, manual close), open a fresh one."""
+        out, r = self._sh('''
+cbm_alive_mock() { return 1; }
+printf 'mock\\nHANDLE-DEAD\\n%s\\n' "$(cbm_plugin_root)" > "$f"
+cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+''')
+        self.assertIn("rc=0", out, r.stderr)
 
 
 if __name__ == "__main__":

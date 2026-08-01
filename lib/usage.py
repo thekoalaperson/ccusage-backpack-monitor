@@ -17,7 +17,8 @@ Three things this gets right that the subprocess did not:
 """
 import json, os, glob, time
 
-SCAN_CACHE_VERSION = 3
+SCAN_CACHE_VERSION = 4
+SCAN_CACHE_MAX = 600      # entries; oldest-touched evicted beyond this
 
 
 def _state_dir():
@@ -63,10 +64,15 @@ class Scanner:
         if not self._dirty:
             return
         files = self._cache.get("files", {})
-        # Drop entries for files that no longer exist so the cache cannot grow
-        # without bound across months of sessions.
-        if len(files) > 400:
+        # Bound the cache. Deleted files go first; if that isn't enough, evict
+        # the least recently touched. Without this it grows for every agent
+        # transcript ever seen (571 entries / 343 KB after a few weeks).
+        if len(files) > SCAN_CACHE_MAX:
             for p in [p for p in files if not os.path.exists(p)]:
+                files.pop(p, None)
+        if len(files) > SCAN_CACHE_MAX:
+            ordered = sorted(files.items(), key=lambda kv: kv[1].get("seen", 0))
+            for p, _ in ordered[:len(files) - SCAN_CACHE_MAX]:
                 files.pop(p, None)
         try:
             tmp = self._path + ".tmp"
@@ -87,6 +93,8 @@ class Scanner:
         sig = "%d-%d" % (st.st_mtime_ns, st.st_size)
         ent = self._cache["files"].get(path)
         if ent and ent.get("sig") == sig:
+            ent["seen"] = int(time.time())   # LRU stamp for eviction
+            self._dirty = True
             return ent["data"]
 
         models = {}
@@ -96,6 +104,7 @@ class Scanner:
         team = agent = None
         last = 0.0
         first = 0.0
+        last_ctx = None
         try:
             with open(path, "r", errors="ignore") as f:
                 for line in f:
@@ -142,6 +151,13 @@ class Scanner:
                     m["cache_creation"] += u.get("cache_creation_input_tokens") or 0
                     m["turns"] += 1
                     outputs.append(u.get("output_tokens") or 0)
+                    # Context in play on the most recent turn: everything the
+                    # model read this request (fresh + cached), which is what
+                    # fills the window. Output is not part of the input window.
+                    ctx = ((u.get("input_tokens") or 0)
+                           + (u.get("cache_read_input_tokens") or 0)
+                           + (u.get("cache_creation_input_tokens") or 0))
+                    last_ctx = (name, ctx)
                     ts = o.get("timestamp")
                     if ts:
                         e = _epoch(ts)
@@ -157,8 +173,9 @@ class Scanner:
 
         data = {"team": team, "agent": agent, "models": models,
                 "outputs": outputs[-256:], "hours": hours,
-                "first": first, "last": last}
-        self._cache["files"][path] = {"sig": sig, "data": data}
+                "first": first, "last": last, "last_ctx": last_ctx}
+        self._cache["files"][path] = {"sig": sig, "data": data,
+                                      "seen": int(time.time())}
         self._dirty = True
         return data
 
@@ -192,7 +209,8 @@ class Scanner:
     def session(self, sid, transcript, cross_project=True):
         """Total a session: its own transcript plus every subagent it spawned."""
         result = {"models": {}, "agents": [], "outputs": [], "cost": 0.0,
-                  "tokens": 0, "self_cost": 0.0, "agent_cost": 0.0}
+                  "tokens": 0, "self_cost": 0.0, "agent_cost": 0.0,
+                  "context": None}
         if not transcript or not os.path.exists(transcript):
             return result
 
@@ -201,6 +219,7 @@ class Scanner:
         if own:
             _merge(result["models"], own["models"])
             result["outputs"] = own["outputs"]
+            result["context"] = own.get("last_ctx")
             result["self_cost"] = sum(m["cost"] for m in own["models"].values())
             started = own.get("first") or 0.0
 
