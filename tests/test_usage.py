@@ -797,31 +797,56 @@ class TestAgentSessionsGetNoPane(Base):
 
     # -- the hook itself -----------------------------------------------------
     def _hook(self, sid, transcript):
-        """Run the SessionStart hook against a mocked backend; report whether it
-        opened a pane."""
-        hook = os.path.join(HERE, "..", "bin", "open-pane.sh")
+        """Run the real SessionStart hook against a faked backend, and report
+        which panes it recorded.
+
+        The hook is copied into the sandbox and the *copied* `common.sh` gets the
+        fake backend appended to it. That is not fussiness: exporting mock shell
+        functions into the environment does NOT work here, because open-pane.sh
+        sources common.sh, which redefines them and silently restores the real
+        AppleScript. An earlier version of this test did exactly that and opened
+        real iTerm panes on the developer's desktop. Patching the file the hook
+        actually sources makes touching a real terminal impossible.
+        """
+        sandbox = os.path.join(self.tmp, "plugin")
+        if not os.path.isdir(sandbox):
+            src = os.path.abspath(os.path.join(HERE, ".."))
+            os.makedirs(sandbox, exist_ok=True)
+            for sub in ("bin", "lib"):
+                shutil.copytree(os.path.join(src, sub), os.path.join(sandbox, sub))
+            with open(os.path.join(sandbox, "lib", "common.sh"), "a") as f:
+                f.write("\n# ---- test backend: never touches a real terminal ----\n"
+                        "cbm_backend()     { printf iterm; }\n"
+                        "cbm_dispatch_ok() { return 0; }\n"
+                        "cbm_open_iterm()  { printf 'HANDLE-FAKE'; }\n"
+                        "cbm_alive_iterm() { return 1; }\n"
+                        "cbm_close_iterm() { return 0; }\n"
+                        "cbm_pane_alive()  { return 1; }\n"
+                        "cbm_pane_close()  { return 0; }\n")
         payload = json.dumps({"session_id": sid, "transcript_path": transcript,
                               "source": "startup", "cwd": "/x"})
-        # Mock the backend by pre-loading overrides, then exec the real hook.
-        script = (
-            'cbm_backend() { printf iterm; }\n'
-            'cbm_dispatch_ok() { return 0; }\n'
-            'cbm_open_iterm() { printf HANDLE-X; }\n'
-            'cbm_alive_iterm() { return 1; }\n'
-            'cbm_pane_alive() { return 1; }\n'
-            'cbm_pane_close() { return 0; }\n'
-            'export -f cbm_backend cbm_dispatch_ok cbm_open_iterm '
-            'cbm_alive_iterm cbm_pane_alive cbm_pane_close\n'
-            'printf %%s %s | bash %s\n' % (json.dumps(payload).replace("'", "'\\''"),
-                                           os.path.abspath(hook)))
         state = os.path.join(self.tmp, "state")
-        subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                       env=dict(os.environ, XDG_STATE_HOME=state,
-                                BASH_ENV="", CBM_BACKEND="iterm"))
+        subprocess.run(["bash", os.path.join(sandbox, "bin", "open-pane.sh")],
+                       input=payload, capture_output=True, text=True,
+                       env=dict(os.environ, XDG_STATE_HOME=state))
         panes = os.path.join(state, "ccusage-backpack-monitor")
         if not os.path.isdir(panes):
             return []
-        return [f for f in os.listdir(panes) if f.endswith(".pane")]
+        return sorted(f for f in os.listdir(panes) if f.endswith(".pane"))
+
+    def test_the_hook_harness_cannot_reach_a_real_terminal(self):
+        """Guard the guard: prove the sandboxed hook uses the fake backend.
+
+        If this ever fails, the suite is capable of opening panes on a real
+        desktop again -- which it once did.
+        """
+        sid = "abc12345-0000-0000-0000-000000000000"
+        p = self._transcript(sid, [{"type": "user", "cwd": "/x"}])
+        self._hook(sid, p)
+        state = os.path.join(self.tmp, "state", "ccusage-backpack-monitor")
+        with open(os.path.join(state, sid + ".pane")) as f:
+            self.assertIn("HANDLE-FAKE", f.read(),
+                          "the hook used a REAL backend, not the test double")
 
     def test_hook_opens_nothing_for_a_teammate(self):
         sid = "8d640dfc-0551-431f-bc45-f70835e642c0"
