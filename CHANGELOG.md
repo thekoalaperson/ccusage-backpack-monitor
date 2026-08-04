@@ -4,6 +4,32 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.9.3] - 2026-08-04
+
+### Fixed
+- **A monitor pane opened for every teammate.** Teammates are not subagents —
+  they are *full* Claude Code sessions, with their own session id, their own
+  top-level transcript, and their own `SessionStart`. The hook opened a pane for
+  whatever session id it was handed, so a session that spawned three teammates
+  ended up with four monitor panes, three of them showing an agent's spend as if
+  it were a session's. Their cost was already attributed to the parent session's
+  panel, which is where it belongs.
+
+  `SessionStart` now declines to open a pane for an agent transcript, detected
+  from the `agent-setting` line Claude Code writes first and the `teamName` that
+  follows within a few lines, or from a `subagents/` path.
+
+  The check only reports "agent" when it can actually tell. A brand-new human
+  session has an empty transcript at `SessionStart` too, so treating "cannot
+  tell" as "agent" would have stopped the monitor opening for anyone — there is
+  an explicit regression test for exactly that.
+
+  Because an empty transcript is genuinely ambiguous at hook time, a pane opened
+  automatically also re-checks once the file has content and closes itself if it
+  turns out to be following an agent. Panes opened deliberately with
+  `/ccusage-monitor` are never closed this way and keep their existing behaviour
+  of naming the agent and its parent session.
+
 ## [0.9.2] - 2026-08-02
 
 ### Fixed
