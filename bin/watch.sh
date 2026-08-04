@@ -13,6 +13,7 @@ cbm_fix_path
 sid="$1"
 transcript="$2"
 poll="${3:-3}"
+mode="${4:-manual}"   # 'auto' = opened by the SessionStart hook
 case "$poll" in ''|*[!0-9]*) poll=3 ;; esac
 [ "$poll" -lt 1 ] && poll=1
 py="$(cbm_python)"
@@ -79,6 +80,16 @@ while true; do
     gray "waiting for session ${sid:0:8} data..."
     sleep "$poll"
     continue
+  fi
+
+  # The race the hook cannot win: at SessionStart a teammate's transcript may
+  # still be empty, which is indistinguishable from a brand-new human session.
+  # Once the file has content the answer is unambiguous, so an auto-opened pane
+  # retires itself here. Only 'auto' panes do this — a pane the user asked for
+  # stays put and says whose agent it is, which is the existing behaviour.
+  if [ "$mode" = auto ] && cbm_is_agent_session "$transcript"; then
+    cbm_close_own_pane "$sid"
+    exit 0
   fi
 
   # Cheap change signature: mtime-size per file (portable: GNU stat, then BSD).

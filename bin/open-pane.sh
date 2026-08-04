@@ -24,9 +24,16 @@ cbm_is_supported || exit 0   # no-op unless tmux/WezTerm/iTerm2 is active
 sid="$(printf '%s' "$input"   | cbm_json_field session_id)"
 trans="$(printf '%s' "$input" | cbm_json_field transcript_path)"
 
+# Never open a pane for an agent. Teammates are full sessions — own session id,
+# own transcript, own SessionStart — so without this every teammate a session
+# spawns gets its own monitor pane, on top of the one the human already has.
+# Their spend is already attributed to the parent session's panel, which is
+# where the user actually wants to see it.
+cbm_is_agent_session "$trans" && exit 0
+
 # Open the pane. When the panel can't run, the pane itself shows the fix and
 # turns into a shell, so this is still useful.
-cbm_open_pane "$sid" "$trans"
+cbm_open_pane "$sid" "$trans" auto
 
 # Backstop: if the panel genuinely can't run, also surface it *through Claude* so
 # the failure isn't silent when the user isn't looking at the pane. Emitted ONLY

@@ -726,5 +726,148 @@ cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
         self.assertIn("rc=0", out, r.stderr)
 
 
+class TestAgentSessionsGetNoPane(Base):
+    """Teammates are FULL Claude Code sessions -- their own session id, their own
+    transcript, their own SessionStart. Without a guard the monitor opens a pane
+    for every teammate a session spawns, on top of the human's own pane.
+
+    The hard part is that the check must stay silent when it cannot tell: a
+    brand-new human session also has an empty transcript at SessionStart, and
+    defaulting to "agent" there would stop the monitor ever opening.
+    """
+
+    def _transcript(self, name, rows):
+        path = os.path.join(self.projects, "proj", name + ".jsonl")
+        write(path, rows)
+        return path
+
+    def _is_agent(self, path):
+        script = ('. "%s/common.sh"\ncbm_is_agent_session %s && echo YES || echo NO'
+                  % (os.path.abspath(LIB), "'" + path + "'"))
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                           env=dict(os.environ,
+                                    XDG_STATE_HOME=os.path.join(self.tmp, "state")))
+        return r.stdout.strip() == "YES"
+
+    # -- detection ----------------------------------------------------------
+    def test_teammate_transcript_is_detected(self):
+        """Exactly the shape Claude Code writes: `agent-setting` first, then a
+        user line carrying teamName."""
+        p = self._transcript("8d640dfc-0551-431f-bc45-f70835e642c0", [
+            {"type": "agent-setting", "agentSetting": "general-purpose"},
+            {"type": "mode", "mode": "normal"},
+            {"type": "permission-mode", "permissionMode": "auto"},
+            {"type": "user", "teamName": "session-ce7fc201",
+             "agentName": "ball-track-research", "cwd": "/x"},
+        ])
+        self.assertTrue(self._is_agent(p))
+
+    def test_subagent_path_is_detected_without_reading(self):
+        p = os.path.join(self.projects, "proj", "sid", "subagents", "agent-a.jsonl")
+        write(p, [msg("claude-opus-5", "m1", out=10)])
+        self.assertTrue(self._is_agent(p))
+        # Even if the file has since been removed, the path alone is conclusive.
+        os.remove(p)
+        self.assertTrue(self._is_agent(p))
+
+    def test_ordinary_session_is_not_an_agent(self):
+        p = self._transcript("abc12345-0000-0000-0000-000000000000", [
+            {"type": "mode", "mode": "normal"},
+            {"type": "user", "cwd": "/x", "gitBranch": "main"},
+            msg("claude-opus-5", "m1", out=1000),
+        ])
+        self.assertFalse(self._is_agent(p))
+
+    def test_empty_and_missing_transcripts_are_not_agents(self):
+        """The critical non-regression: a fresh session's transcript is empty at
+        SessionStart. Guessing "agent" here would break the whole plugin."""
+        empty = self._transcript("fresh0000-0000-0000-0000-000000000000", [])
+        self.assertFalse(self._is_agent(empty))
+        self.assertFalse(self._is_agent(
+            os.path.join(self.projects, "proj", "nope.jsonl")))
+        self.assertFalse(self._is_agent(""))
+
+    def test_agent_words_deep_in_conversation_do_not_false_positive(self):
+        """A session that merely *talks* about teamName must still get a pane."""
+        rows = [{"type": "user", "cwd": "/x"}] * 12
+        rows.append({"type": "user", "message": {"role": "user",
+                     "content": 'what does "teamName" mean in "agentSetting"?'}})
+        p = self._transcript("chatty000-0000-0000-0000-000000000000", rows)
+        self.assertFalse(self._is_agent(p))
+
+    # -- the hook itself -----------------------------------------------------
+    def _hook(self, sid, transcript):
+        """Run the real SessionStart hook against a faked backend, and report
+        which panes it recorded.
+
+        The hook is copied into the sandbox and the *copied* `common.sh` gets the
+        fake backend appended to it. That is not fussiness: exporting mock shell
+        functions into the environment does NOT work here, because open-pane.sh
+        sources common.sh, which redefines them and silently restores the real
+        AppleScript. An earlier version of this test did exactly that and opened
+        real iTerm panes on the developer's desktop. Patching the file the hook
+        actually sources makes touching a real terminal impossible.
+        """
+        sandbox = os.path.join(self.tmp, "plugin")
+        if not os.path.isdir(sandbox):
+            src = os.path.abspath(os.path.join(HERE, ".."))
+            os.makedirs(sandbox, exist_ok=True)
+            for sub in ("bin", "lib"):
+                shutil.copytree(os.path.join(src, sub), os.path.join(sandbox, sub))
+            with open(os.path.join(sandbox, "lib", "common.sh"), "a") as f:
+                f.write("\n# ---- test backend: never touches a real terminal ----\n"
+                        "cbm_backend()     { printf iterm; }\n"
+                        "cbm_dispatch_ok() { return 0; }\n"
+                        "cbm_open_iterm()  { printf 'HANDLE-FAKE'; }\n"
+                        "cbm_alive_iterm() { return 1; }\n"
+                        "cbm_close_iterm() { return 0; }\n"
+                        "cbm_pane_alive()  { return 1; }\n"
+                        "cbm_pane_close()  { return 0; }\n")
+        payload = json.dumps({"session_id": sid, "transcript_path": transcript,
+                              "source": "startup", "cwd": "/x"})
+        state = os.path.join(self.tmp, "state")
+        subprocess.run(["bash", os.path.join(sandbox, "bin", "open-pane.sh")],
+                       input=payload, capture_output=True, text=True,
+                       env=dict(os.environ, XDG_STATE_HOME=state))
+        panes = os.path.join(state, "ccusage-backpack-monitor")
+        if not os.path.isdir(panes):
+            return []
+        return sorted(f for f in os.listdir(panes) if f.endswith(".pane"))
+
+    def test_the_hook_harness_cannot_reach_a_real_terminal(self):
+        """Guard the guard: prove the sandboxed hook uses the fake backend.
+
+        If this ever fails, the suite is capable of opening panes on a real
+        desktop again -- which it once did.
+        """
+        sid = "abc12345-0000-0000-0000-000000000000"
+        p = self._transcript(sid, [{"type": "user", "cwd": "/x"}])
+        self._hook(sid, p)
+        state = os.path.join(self.tmp, "state", "ccusage-backpack-monitor")
+        with open(os.path.join(state, sid + ".pane")) as f:
+            self.assertIn("HANDLE-FAKE", f.read(),
+                          "the hook used a REAL backend, not the test double")
+
+    def test_hook_opens_nothing_for_a_teammate(self):
+        sid = "8d640dfc-0551-431f-bc45-f70835e642c0"
+        p = self._transcript(sid, [
+            {"type": "agent-setting", "agentSetting": "general-purpose"},
+            {"type": "user", "teamName": "session-ce7fc201",
+             "agentName": "ball-track-research"},
+        ])
+        self.assertEqual(self._hook(sid, p), [],
+                         "a teammate session must not get its own monitor pane")
+
+    def test_hook_still_opens_for_a_real_session(self):
+        sid = "abc12345-0000-0000-0000-000000000000"
+        p = self._transcript(sid, [{"type": "user", "cwd": "/x"}])
+        self.assertEqual(self._hook(sid, p), [sid + ".pane"])
+
+    def test_hook_still_opens_for_a_brand_new_empty_session(self):
+        sid = "fresh0000-0000-0000-0000-000000000000"
+        p = self._transcript(sid, [])
+        self.assertEqual(self._hook(sid, p), [sid + ".pane"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

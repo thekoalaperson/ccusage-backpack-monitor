@@ -301,7 +301,11 @@ cbm_pane_close() {  # $1=handle  $2=backend(optional)
 # stash a backend-tagged state file. Idempotent. Shared by the SessionStart hook
 # and the /ccusage-monitor command. Returns: 0 opened, 2 already open, 1 not
 # opened — so callers need no extra liveness queries to report the outcome.
-cbm_open_pane() {  # $1=sid  $2=trans
+#
+# $3 is 'auto' when the SessionStart hook opened it and 'manual' (the default,
+# used by the toggle command) when the user asked for it by name. Only an auto
+# pane is allowed to close itself on discovering it follows an agent.
+cbm_open_pane() {  # $1=sid  $2=trans  $3=auto|manual
   local sid="$1" trans="$2"
   [ -z "$sid" ] && return 1
 
@@ -344,8 +348,11 @@ cbm_open_pane() {  # $1=sid  $2=trans
   # or iTerm's shell) — never re-interpreting the user data in its own language.
   # The absolute watcher path is baked in so the new pane finds it regardless
   # of cwd/OS.
-  local cmd handle
-  cmd="$watcher $(cbm_shq "$sid") $(cbm_shq "$trans") $(cbm_shq "$poll")"
+  # `mode` reaches the watcher so it knows whether it was opened automatically by
+  # the SessionStart hook or deliberately by the user. Only an auto-opened pane
+  # may retire itself on discovering it is following an agent.
+  local cmd handle mode="${3:-manual}"
+  cmd="$watcher $(cbm_shq "$sid") $(cbm_shq "$trans") $(cbm_shq "$poll") $(cbm_shq "$mode")"
   handle="$("cbm_open_$backend" "$cmd" "$split" "$size")" || return 1
   [ -z "$handle" ] && return 1
   # If we can't record the pane, close it again rather than leaking an orphan
@@ -488,6 +495,44 @@ OSA
 # ---------------------------------------------------------------------------
 # Misc helpers
 # ---------------------------------------------------------------------------
+
+# Is this session an *agent* rather than a person's session?
+#
+# Teammates are full Claude Code sessions: their own session id, their own
+# transcript at the top level of a project directory, their own SessionStart.
+# So without this check the monitor opens a second pane for every teammate a
+# session spawns, which is the bug this exists to prevent. Task subagents are
+# easier — they live under a `subagents/` directory.
+#
+# Only the first few lines are read. An agent transcript announces itself
+# immediately: line 1 is `agent-setting`, and `teamName` has appeared by line 4.
+# Reading further would risk matching those key names inside ordinary
+# conversation text and suppressing a legitimate monitor.
+#
+# Returns 0 (an agent) ONLY when it can actually tell. A brand-new human session
+# has an empty transcript at SessionStart too, so "can't tell yet" must mean
+# "not an agent" — the opposite default would stop the pane ever opening.
+cbm_is_agent_session() {  # $1=transcript path
+  local t="$1"
+  case "$t" in
+    */subagents/*) return 0 ;;
+  esac
+  [ -n "$t" ] && [ -f "$t" ] || return 1
+  head -n 10 "$t" 2>/dev/null | grep -q '"teamName"\|"agentSetting"'
+}
+
+# Close the pane recorded for $1 and forget it. Shared by the SessionEnd hook and
+# by a watcher that has worked out it should never have been opened.
+cbm_close_own_pane() {  # $1=sid
+  local f backend handle
+  f="$(cbm_state_dir)/$1.pane"
+  [ -f "$f" ] || return 0
+  backend="$(cbm_state_backend "$f")"
+  handle="$(cbm_state_handle "$f")"
+  rm -f "$f"
+  [ -n "$handle" ] || return 0
+  cbm_pane_close "$handle" "$backend"
+}
 
 # Portable change-signature for a file: "<mtime>-<size>". GNU stat FIRST —
 # on Linux, BSD `stat -f '%m-%z'` does NOT fail cleanly: `-f` means filesystem
