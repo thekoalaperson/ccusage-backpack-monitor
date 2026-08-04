@@ -44,15 +44,58 @@ locate() {
   transcript="$(find -L "$HOME/.claude/projects" -name "$sid.jsonl" 2>/dev/null | head -1)"
 }
 
+# ---------------------------------------------------------------------------
+# Tabs. The panel draws a pinned header on every tab, so switching is for
+# digging, not for watching -- which matters because the pane has to be focused
+# before it sees a keystroke at all.
+# ---------------------------------------------------------------------------
+tab=0
+ntabs=6
+# Interactive only when stdin is a terminal AND tabs are enabled. Without the
+# tty test `read` would fail instantly instead of blocking, turning the poll
+# into a busy loop -- the exact opposite of this tool's promise.
+interactive=0
+if [ "${CBM_TABS:-1}" != "0" ] && [ -t 0 ]; then interactive=1; fi
+
 # Rich python panel when available; otherwise fall back to plain ccusage output.
 render() {
   if [ -n "$py" ] && [ -f "$here/../lib/render.py" ]; then
-    "$py" "$here/../lib/render.py" "$sid" "$transcript" 2>/dev/null && return
+    "$py" "$here/../lib/render.py" "$sid" "$transcript" "$tab" 2>/dev/null && return
   fi
   [ -n "$ccu" ] || return 0
   eval "$ccu session -i $(cbm_shq "$sid")" 2>&1
   gray ""
   gray "session ${sid:0:8}  |  live (updates on change)  |  Ctrl-C to stop"
+}
+
+# Wait up to $poll seconds for a keystroke, printing nothing. Sets $key to a
+# logical name ('' when it simply timed out, which is the normal idle path).
+#
+# This read REPLACES the sleep -- it is the poll interval, not an addition to
+# it. Idle cost is unchanged: one timed read, then the same cheap stat check.
+#
+# bash 3.2 (what macOS ships) rejects a fractional `-t`, so the tail of an
+# escape sequence is read with `-t 1`; those bytes always arrive in the same
+# burst as the ESC, so it returns immediately rather than waiting.
+read_key() {
+  key=""
+  local rest=""
+  read -rsn1 -t "$poll" key 2>/dev/null || { key=""; return 0; }
+  case "$key" in
+    $'\033')
+      read -rsn2 -t 1 rest 2>/dev/null
+      # '[' is the normal cursor-key mode; 'O' is application cursor mode,
+      # which tmux and some terminals send instead. Both must work.
+      case "$rest" in
+        '[C'|'OC') key=right ;;
+        '[D'|'OD') key=left  ;;
+        '[B'|'OB') key=right ;;   # down == next, up == prev: same axis, one strip
+        '[A'|'OA') key=left  ;;
+        *) key="" ;;
+      esac
+      ;;
+    $'\t') key=right ;;
+  esac
 }
 
 # Change signature: the session transcript PLUS the directory its subagents
@@ -70,15 +113,22 @@ signature() {
   fi
 }
 
+# A resize changes the width every row is fitted to, so the panel must be
+# redrawn or it stays laid out for the old pane.
+resized=0
+help_once=0
+trap 'resized=1' WINCH
+
 # Sentinel (not "") so the first iteration always renders — and so a host where
 # stat yields no signature still renders once before idling, rather than never.
 last="__init__"
+force=0
 while true; do
   locate
   if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
     clear
     gray "waiting for session ${sid:0:8} data..."
-    sleep "$poll"
+    if [ "$interactive" = 1 ]; then read_key; else sleep "$poll"; fi
     continue
   fi
 
@@ -93,12 +143,36 @@ while true; do
   fi
 
   # Cheap change signature: mtime-size per file (portable: GNU stat, then BSD).
-  # No render unless something actually changed.
+  # No render unless something actually changed -- or the user asked for a
+  # different view, which must feel instant rather than wait for the next turn.
   sig="$(signature)"
-  if [ "$sig" != "$last" ]; then
+  if [ "$sig" != "$last" ] || [ "$force" = 1 ] || [ "$resized" = 1 ]; then
     last="$sig"
+    force=0
+    resized=0
     clear
-    render
+    # The key list is a one-shot: shown on the render right after `?`, gone on
+    # the next one, so it can never become clutter in a 25%-width pane.
+    if [ "$help_once" = 1 ]; then
+      CBM_HELP=1 render
+      help_once=0
+    else
+      render
+    fi
   fi
-  sleep "$poll"
+
+  if [ "$interactive" != 1 ]; then
+    sleep "$poll"
+    continue
+  fi
+
+  read_key
+  case "$key" in
+    right)   tab=$(( (tab + 1) % ntabs ));         force=1 ;;
+    left)    tab=$(( (tab - 1 + ntabs) % ntabs )); force=1 ;;
+    [1-6])   tab=$(( key - 1 ));                   force=1 ;;
+    r|R)                                           force=1 ;;
+    '?'|h|H) help_once=1;                          force=1 ;;
+    q|Q)     clear; cbm_exec_shell ;;
+  esac
 done

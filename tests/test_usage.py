@@ -46,13 +46,54 @@ class Base(unittest.TestCase):
         # Redirect all state (scan cache, pricing snapshot) into the sandbox.
         os.environ["XDG_STATE_HOME"] = os.path.join(self.tmp, "state")
         os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        # HOME too: the panel now reads account facts from ~/.claude.json, and a
+        # suite that picked up the developer's real plan and email would both
+        # leak them into test output and give a different answer per machine.
+        self._home = os.environ.get("HOME")
+        os.environ["HOME"] = os.path.join(self.tmp, "home")
+        os.makedirs(os.environ["HOME"], exist_ok=True)
         self.projects = os.path.join(self.tmp, "projects")
         os.makedirs(self.projects, exist_ok=True)
         self.pricing = Pricing(allow_refresh=False)
         self.scan = Scanner(self.pricing)
 
     def tearDown(self):
+        if self._home is not None:
+            os.environ["HOME"] = self._home
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # -- account fixtures ---------------------------------------------------
+    def write_account(self, limits=None, oauth=None, fetched_ms=None, stats=None):
+        """Plant a ~/.claude.json (and optionally stats-cache.json) in the sandbox."""
+        conf = {}
+        conf["oauthAccount"] = oauth if oauth is not None else {
+            "displayName": "Testy", "emailAddress": "testy@example.com",
+            "organizationName": "Testy's Org", "organizationType": "claude_max",
+            "organizationRateLimitTier": "default_claude_max_5x",
+            "billingType": "stripe_subscription", "organizationRole": "admin",
+            "subscriptionCreatedAt": "2026-07-24T19:23:02.350742Z"}
+        if limits is not None:
+            ms = fetched_ms if fetched_ms is not None else int(time.time() * 1000)
+            conf["cachedUsageUtilization"] = {
+                "fetchedAtMs": ms,
+                "utilization": {"limits": limits, "extra_usage": {"is_enabled": False}}}
+        with open(os.path.join(os.environ["HOME"], ".claude.json"), "w") as f:
+            json.dump(conf, f)
+        if stats is not None:
+            d = os.path.join(os.environ["HOME"], ".claude")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "stats-cache.json"), "w") as f:
+                json.dump(stats, f)
+
+    @staticmethod
+    def limit_row(kind, group, percent, resets_in=3600, scope=None, severity="normal"):
+        iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                            time.gmtime(time.time() + resets_in))
+        row = {"kind": kind, "group": group, "percent": percent,
+               "severity": severity, "resets_at": iso, "is_active": True}
+        if scope:
+            row["scope"] = {"model": {"display_name": scope}}
+        return row
 
 
 class TestPricing(Base):
@@ -867,6 +908,460 @@ class TestAgentSessionsGetNoPane(Base):
         sid = "fresh0000-0000-0000-0000-000000000000"
         p = self._transcript(sid, [])
         self.assertEqual(self._hook(sid, p), [sid + ".pane"])
+class TestAccount(Base):
+    """The account/limit caches are private client internals with no
+    compatibility promise, so the contract is: read what's there, mark how old
+    it is, and never raise."""
+
+    def _acct(self, **kw):
+        import account
+        self.write_account(**kw)
+        return account.Account(home=os.environ["HOME"])
+
+    def test_plan_label_carries_the_multiplier(self):
+        import account
+        cases = [
+            ({"organizationRateLimitTier": "default_claude_max_5x",
+              "organizationType": "claude_max"}, "Max 5x"),
+            ({"organizationRateLimitTier": "default_claude_max_20x"}, "Max 20x"),
+            ({"organizationType": "claude_pro"}, "Pro"),
+            ({"organizationType": "claude_team"}, "Team"),
+            ({"organizationType": "claude_enterprise"}, "Ent"),
+            ({"billingType": "api"}, "API"),
+            ({}, ""),
+        ]
+        for oauth, want in cases:
+            self.assertEqual(account.plan_label(oauth), want, oauth)
+
+    def test_missing_file_is_not_an_error(self):
+        import account
+        a = account.Account(home=os.path.join(self.tmp, "nope"))
+        self.assertIsNone(a.identity())
+        self.assertIsNone(a.limits())
+        self.assertIsNone(a.history())
+
+    def test_corrupt_file_is_not_an_error(self):
+        import account
+        with open(os.path.join(os.environ["HOME"], ".claude.json"), "w") as f:
+            f.write("{not json at all")
+        a = account.Account(home=os.environ["HOME"])
+        self.assertIsNone(a.identity())
+        self.assertIsNone(a.limits())
+
+    def test_unknown_shape_hides_rows_rather_than_raising(self):
+        """A future Claude Code renaming these keys must degrade, not crash."""
+        import account
+        with open(os.path.join(os.environ["HOME"], ".claude.json"), "w") as f:
+            json.dump({"oauthAccount": "not-a-dict",
+                       "cachedUsageUtilization": {"utilization": [1, 2, 3]}}, f)
+        a = account.Account(home=os.environ["HOME"])
+        self.assertIsNone(a.identity())
+        self.assertIsNone(a.limits())
+
+    def test_limits_are_parsed_and_sorted_hottest_first(self):
+        a = self._acct(limits=[
+            self.limit_row("session", "session", 12),
+            self.limit_row("weekly_scoped", "weekly", 21, scope="Fable"),
+            self.limit_row("weekly_scoped", "weekly", 63, scope="Opus"),
+        ])
+        lim = a.limits()
+        self.assertEqual(round(lim["session"]["percent"]), 12)
+        self.assertEqual([round(r["percent"]) for r in lim["weekly"]], [63, 21])
+        self.assertEqual(lim["weekly"][0]["scope"], "Opus")
+        self.assertLess(lim["age"], 60)
+
+    def test_absent_percentage_is_not_reported_as_zero(self):
+        """A limit the server didn't quantify must not render as an empty
+        meter -- that reads as 'you have used none of it', which is a claim."""
+        a = self._acct(limits=[{"kind": "weekly_scoped", "group": "weekly",
+                                "percent": None, "resets_at": None}])
+        lim = a.limits()
+        self.assertEqual(lim["weekly"], [])
+        self.assertIsNone(lim["session"])
+
+    def test_stale_cache_is_reported_by_age(self):
+        import account
+        old = int((time.time() - 3600) * 1000)
+        a = self._acct(limits=[self.limit_row("session", "session", 5)],
+                       fetched_ms=old)
+        self.assertGreater(a.limits()["age"], account.STALE_AFTER)
+
+    def test_legacy_five_hour_block_still_read(self):
+        """An older client wrote only `five_hour`; keep reading it."""
+        import account
+        conf = {"cachedUsageUtilization": {
+            "fetchedAtMs": int(time.time() * 1000),
+            "utilization": {"five_hour": {"utilization": 42,
+                                          "resets_at": "2026-08-04T10:20:00+00:00"}}}}
+        with open(os.path.join(os.environ["HOME"], ".claude.json"), "w") as f:
+            json.dump(conf, f)
+        lim = account.Account(home=os.environ["HOME"]).limits()
+        self.assertEqual(round(lim["session"]["percent"]), 42)
+
+    def test_email_and_org_are_withheld_by_default(self):
+        """This pane gets screen-shared; identity is opt-in."""
+        a = self._acct(limits=[])
+        os.environ.pop("CBM_ACCOUNT", None)
+        ident = a.identity()
+        self.assertEqual(ident["name"], "Testy")
+        self.assertEqual(ident["email"], "")
+        self.assertEqual(ident["org"], "")
+        self.assertEqual(ident["plan"], "Max 5x")
+        try:
+            os.environ["CBM_ACCOUNT"] = "full"
+            ident = a.identity()
+            self.assertEqual(ident["email"], "testy@example.com")
+            self.assertEqual(ident["org"], "Testy's Org")
+        finally:
+            os.environ.pop("CBM_ACCOUNT", None)
+
+    def test_severity_from_server_outranks_the_percentage(self):
+        import account
+        self.assertEqual(account.severity_rank({"percent": 3, "severity": "warning"}), 1)
+        self.assertEqual(account.severity_rank({"percent": 3, "severity": "critical"}), 2)
+        self.assertEqual(account.severity_rank({"percent": 95, "severity": ""}), 2)
+        self.assertEqual(account.severity_rank({"percent": 10, "severity": ""}), 0)
+
+    def test_history_totals_and_staleness(self):
+        import account
+        a = self._acct(limits=[], stats={
+            "lastComputedDate": "1999-01-01",
+            "totalSessions": 145, "totalMessages": 44164,
+            "firstSessionDate": "2026-06-24T14:58:31.893Z",
+            "dailyModelTokens": [
+                {"date": "2026-08-02", "tokensByModel": {"claude-opus-5": 10}},
+                {"date": "2026-08-03", "tokensByModel": {"claude-fable-5": 90,
+                                                         "claude-opus-5": 10}}]})
+        h = a.history()
+        self.assertEqual(h["sessions"], 145)
+        self.assertEqual(h["days"][-1]["tokens"], 100)
+        self.assertEqual(h["days"][-1]["models"][0], "claude-fable-5")
+        self.assertTrue(h["stale"])
+
+
+class TestTabs(Base):
+    """Every tab must render, fit the pane, and survive missing data."""
+
+    TABS = ["live", "limits", "models", "agents", "trend", "account"]
+
+    def _session(self, sid="abc12345-0000-0000-0000-000000000000"):
+        # Under the sandbox HOME, because the account-wide 5h block scans
+        # ~/.claude/projects -- a fixture parked anywhere else is invisible to it.
+        root = os.path.join(os.environ["HOME"], ".claude", "projects")
+        path = os.path.join(root, "proj", sid + ".jsonl")
+        rows = [{"type": "ai-title", "aiTitle": "a test session"},
+                {"type": "permission-mode", "permissionMode": "auto"}]
+        # "Now", so the rolling 5h block is actually active -- a fixture dated
+        # in the past silently skips every burn-rate assertion below.
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        m = msg("claude-opus-5", "m1", inp=50_000, out=9_000,
+                cache_read=400_000, c1h=60_000, ts=now_iso)
+        m["gitBranch"] = "main"
+        m["version"] = "2.1.221"
+        m["effort"] = "xhigh"
+        m["cwd"] = "/Users/x/projects/thing"
+        rows.append(m)
+        write(path, rows)
+        write(os.path.join(root, "proj", sid, "subagents", "agent-a.jsonl"),
+              [{"type": "agent-setting", "agentName": "scout"},
+               msg("claude-sonnet-5", "s1", out=1_000_000, ts=now_iso)])
+        return sid, path
+
+    def _run(self, sid, path, tab="", env=None):
+        e = dict(os.environ)
+        e["CBM_NO_NETWORK"] = "1"
+        e.update(env or {})
+        return subprocess.run(
+            [sys.executable, os.path.join(LIB, "render.py"), sid, path, str(tab)],
+            capture_output=True, text=True, env=e)
+
+    def test_every_tab_renders(self):
+        sid, path = self._session()
+        self.write_account(limits=[
+            self.limit_row("session", "session", 12),
+            self.limit_row("weekly_scoped", "weekly", 21, scope="Fable")],
+            stats={"lastComputedDate": "2026-08-03", "totalSessions": 3,
+                   "totalMessages": 10, "firstSessionDate": "2026-06-24",
+                   "dailyModelTokens": [{"date": "2026-08-03",
+                                         "tokensByModel": {"claude-opus-5": 5}}]})
+        expect = {"live": "MODELS", "limits": "RATE LIMITS", "models": "MODELS",
+                  "agents": "AGENTS", "trend": "7 DAYS", "account": "ACCOUNT"}
+        for tab in self.TABS:
+            r = self._run(sid, path, tab)
+            self.assertEqual(r.returncode, 0, "%s: %s" % (tab, r.stderr))
+            self.assertIn(expect[tab], r.stdout, tab)
+            # The pinned header is on every tab -- that's the whole point.
+            self.assertIn("ctx", r.stdout, tab)
+            self.assertIn("$", r.stdout, tab)
+
+    def test_tab_accepts_index_or_name_and_never_fails(self):
+        sid, path = self._session()
+        for arg in ("1", "limits", "99", "-3", "bogus", ""):
+            r = self._run(sid, path, arg)
+            self.assertEqual(r.returncode, 0, "%r: %s" % (arg, r.stderr))
+
+    def test_no_tab_line_overflows_pane_width(self):
+        """Same guarantee as the base panel, now across all six views."""
+        import unicodedata
+        sid, path = self._session()
+        self.write_account(limits=[
+            self.limit_row("session", "session", 100),
+            self.limit_row("weekly_scoped", "weekly", 21, scope="Fable"),
+            self.limit_row("weekly_scoped", "weekly", 99, scope="Opus 4.8 Long Name")],
+            stats={"lastComputedDate": "2026-08-03", "totalSessions": 145,
+                   "totalMessages": 44164, "firstSessionDate": "2026-06-24",
+                   "dailyModelTokens": [{"date": "2026-08-0%d" % i,
+                                         "tokensByModel": {"claude-opus-5": i * 1e6}}
+                                        for i in range(1, 8)]})
+        ansi = re.compile(r"\033\[[0-9;]*m")
+
+        def width(s):
+            s = ansi.sub("", s)
+            return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+
+        for cols in (20, 24, 30, 34, 40, 46, 60, 72):
+            for tab in self.TABS:
+                r = self._run(sid, path, tab, {"COLUMNS": str(cols)})
+                self.assertEqual(r.returncode, 0, r.stderr)
+                for ln in r.stdout.splitlines():
+                    self.assertLessEqual(
+                        width(ln), cols,
+                        "tab %s overflows at COLUMNS=%d: %r"
+                        % (tab, cols, ansi.sub("", ln)))
+
+    def test_no_color_across_tabs(self):
+        sid, path = self._session()
+        self.write_account(limits=[self.limit_row("session", "session", 12)])
+        for tab in self.TABS:
+            r = self._run(sid, path, tab, {"NO_COLOR": "1"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("\033[", r.stdout, tab)
+
+    def test_active_tab_is_marked_without_color(self):
+        sid, path = self._session()
+        r = self._run(sid, path, "models", {"NO_COLOR": "1"})
+        self.assertIn("[models]", r.stdout)
+
+    def test_tabs_off_restores_the_static_panel(self):
+        sid, path = self._session()
+        r = self._run(sid, path, "3", {"CBM_TABS": "0"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("MODELS", r.stdout)          # forced back to the live view
+        self.assertNotIn("live limits", r.stdout)  # no strip
+        self.assertIn("Ctrl-C", r.stdout)
+
+    def test_limits_absent_degrades_quietly(self):
+        """No cache (fresh machine, or a rename upstream) must not break it."""
+        sid, path = self._session()
+        for tab in self.TABS:
+            r = self._run(sid, path, tab)
+            self.assertEqual(r.returncode, 0, "%s: %s" % (tab, r.stderr))
+        r = self._run(sid, path, "live")
+        self.assertNotIn("week", r.stdout)
+        # Without the server's 5h percentage, the local dollar figure is the
+        # only 5h number there is, so it must come back.
+        self.assertIn("5h", r.stdout)
+
+    def test_stale_limits_are_marked(self):
+        sid, path = self._session()
+        self.write_account(limits=[self.limit_row("session", "session", 12)],
+                           fetched_ms=int((time.time() - 7200) * 1000))
+        r = self._run(sid, path, "live", {"COLUMNS": "60"})
+        self.assertIn("~12%", r.stdout)
+
+    def test_account_identity_is_not_leaked_by_default(self):
+        sid, path = self._session()
+        self.write_account(limits=[])
+        r = self._run(sid, path, "account", {"COLUMNS": "60"})
+        self.assertIn("Testy", r.stdout)
+        self.assertNotIn("testy@example.com", r.stdout)
+        r = self._run(sid, path, "account", {"COLUMNS": "60", "CBM_ACCOUNT": "full"})
+        self.assertIn("testy@example.com", r.stdout)
+
+    def test_account_off_hides_it_everywhere(self):
+        sid, path = self._session()
+        self.write_account(limits=[])
+        for tab in self.TABS:
+            r = self._run(sid, path, tab, {"CBM_ACCOUNT": "0", "COLUMNS": "60"})
+            self.assertNotIn("Testy", r.stdout, tab)
+
+    def test_session_identity_reaches_the_panel(self):
+        sid, path = self._session()
+        r = self._run(sid, path, "account", {"COLUMNS": "60"})
+        for want in ("a test session", "main", "xhigh", "auto", "2.1.221"):
+            self.assertIn(want, r.stdout, want)
+
+    def test_cache_hit_rate_is_shown(self):
+        sid, path = self._session()
+        r = self._run(sid, path, "live", {"COLUMNS": "60"})
+        self.assertIn("cache", r.stdout)
+
+
+def _cpu_seconds(pid):
+    """CPU seconds a process has used, via `ps`. None if it can't be read."""
+    try:
+        out = subprocess.run(["ps", "-o", "time=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        return None
+    if ":" not in out:
+        return None
+    try:
+        head, ss = out.rsplit(":", 1)          # [dd-]hh:mm:ss.ss or mm:ss.ss
+        mins = int(head.split(":")[-1] or 0)
+        return mins * 60 + float(ss)
+    except ValueError:
+        return None
+
+
+class TestWatchKeys(unittest.TestCase):
+    """The interactive loop, driven through a real pty.
+
+    Two properties matter more than the key mapping itself: it must not poll
+    faster than before, and it must not spin when there is no terminal.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cbm-keys-")
+        self.home = os.path.join(self.tmp, "home")
+        self.projects = os.path.join(self.home, ".claude", "projects", "proj")
+        os.makedirs(self.projects, exist_ok=True)
+        self.sid = "abc12345-0000-0000-0000-000000000000"
+        self.path = os.path.join(self.projects, self.sid + ".jsonl")
+        write(self.path, [msg("claude-opus-5", "m1", out=1_000_000)])
+        self.watch = os.path.join(HERE, "..", "bin", "watch.sh")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _env(self):
+        e = dict(os.environ)
+        e.update({"HOME": self.home, "COLUMNS": "60", "LINES": "40",
+                  "CBM_NO_NETWORK": "1", "TERM": "xterm-256color",
+                  "XDG_STATE_HOME": os.path.join(self.tmp, "state"),
+                  "XDG_CONFIG_HOME": os.path.join(self.tmp, "config")})
+        return e
+
+    def _drive(self, keys, settle=1.2):
+        """Run the watcher on a pty, send `keys`, return everything it drew."""
+        import pty, select, signal
+        pid, fd = pty.fork()
+        if pid == 0:                                   # child: the watcher
+            os.environ.update(self._env())
+            try:
+                os.execv("/bin/sh", ["sh", self.watch, self.sid, self.path, "1"])
+            finally:
+                os._exit(1)
+        buf = b""
+
+        def pump(seconds):
+            nonlocal buf
+            end = time.time() + seconds
+            while time.time() < end:
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    try:
+                        buf += os.read(fd, 65536)
+                    except OSError:
+                        return
+        try:
+            pump(settle)
+            for k in keys:
+                os.write(fd, k)
+                pump(0.8)
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+            os.close(fd)
+        return buf.decode(errors="ignore")
+
+    def test_right_arrow_switches_tab(self):
+        out = self._drive([b"\033[C"])
+        self.assertIn("RATE LIMITS", out)
+
+    def test_application_cursor_mode_arrow_also_works(self):
+        """tmux and some terminals send ESC O C instead of ESC [ C."""
+        out = self._drive([b"\033OC"])
+        self.assertIn("RATE LIMITS", out)
+
+    def test_number_key_jumps(self):
+        # Tab 4 is `agents`, and this fixture has none -- so that body's text
+        # appears nowhere else, which makes it an unambiguous signal.
+        out = self._drive([b"4"])
+        self.assertIn("none in this session", out)
+
+    def test_left_arrow_wraps_to_the_last_tab(self):
+        out = self._drive([b"\033[D"])
+        self.assertIn("ACCOUNT", out)
+
+    def test_help_key_shows_and_then_clears(self):
+        out = self._drive([b"?", b"3"])
+        self.assertIn("jump to tab", out)
+
+    def test_unknown_key_is_ignored(self):
+        out = self._drive([b"Z"])
+        self.assertIn("MODELS", out)
+        self.assertNotIn("RATE LIMITS", out)
+
+    def test_no_tty_does_not_spin(self):
+        """Without a terminal, `read` fails instantly -- if that became the
+        loop's only pause it would burn a core. It must fall back to sleep."""
+        e = self._env()
+        # stdout to /dev/null, not a pipe: an undrained pipe would fill and block
+        # the watcher, which would make "it used no CPU" true for the wrong reason.
+        p = subprocess.Popen(["/bin/sh", self.watch, self.sid, self.path, "1"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, env=e)
+        try:
+            time.sleep(3.0)
+            cpu = _cpu_seconds(p.pid)
+            if cpu is None:
+                self.skipTest("ps unavailable")
+            self.assertLess(cpu, 1.0, "watcher spun without a tty (%.2fs CPU)" % cpu)
+        finally:
+            p.kill()
+            p.wait()
+
+    def test_idle_with_a_tty_costs_nothing(self):
+        """The read replaces the sleep; it must not poll any harder.
+
+        The pty is drained throughout. Without that the watcher would block on a
+        full buffer, use no CPU for the obvious wrong reason, and the assertion
+        would pass while proving nothing.
+        """
+        import pty, select, signal
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ.update(self._env())
+            try:
+                os.execv("/bin/sh", ["sh", self.watch, self.sid, self.path, "1"])
+            finally:
+                os._exit(1)
+        try:
+            end = time.time() + 4.0
+            while time.time() < end:
+                r, _, _ = select.select([fd], [], [], 0.1)
+                if r:
+                    try:
+                        os.read(fd, 65536)
+                    except OSError:
+                        break
+            cpu = _cpu_seconds(pid)
+            if cpu is None:
+                self.skipTest("ps unavailable")
+            # Four seconds of wall clock, four poll intervals. A busy loop would
+            # be seconds of CPU; a correct one is milliseconds.
+            self.assertLess(cpu, 1.0, "idle watcher burned %.2fs CPU" % cpu)
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+            os.close(fd)
 
 
 if __name__ == "__main__":

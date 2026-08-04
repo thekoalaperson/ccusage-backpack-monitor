@@ -16,7 +16,7 @@ It works in **tmux**, **WezTerm**, and **iTerm2**, on **macOS and Linux**.
        alt="A live ccusage cost pane — spend, per-model breakdown, burn rate, and a tokens-per-turn sparkline — in a side pane beside a Claude Code session">
 </p>
 
-> **Status:** v0.9.3 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
+> **Status:** v0.10.0 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
 > iTerm2 (macOS). In any other terminal the hooks no-op silently, so it's safe
 > to install anywhere.
 
@@ -125,6 +125,9 @@ Set these as environment variables before launching `claude`:
 | `CBM_BACKEND`        | _(auto)_      | Force a terminal backend: `tmux`, `wezterm`, or `iterm`. Unset = auto-detect (tmux → WezTerm → iTerm2). |
 | `CBM_WEZTERM_PERCENT`| `CBM_SIZE`    | WezTerm-only override for the split size (percent of the source pane). Unset, it inherits `CBM_SIZE`. |
 | `CBM_BLOCKS`         | `1`           | `0` hides the 5h burn-rate/projection section        |
+| `CBM_TABS`           | `1`           | `0` disables the tab strip and arrow-key navigation — a single static panel |
+| `CBM_LIMITS`         | `1`           | `0` hides the account rate-limit meters (5h / weekly) |
+| `CBM_ACCOUNT`        | _(name only)_ | `0` hides account identity entirely; `full` adds your email and organisation name |
 | `CBM_AGENTS`         | `1`           | `0` hides the subagent breakdown                     |
 | `CBM_GRAPH`          | `1`           | `0` hides the sparkline                              |
 | `CBM_CONTEXT`        | `1`           | `0` hides the context-window gauge                   |
@@ -144,6 +147,69 @@ count is shown instead of a percentage against a guessed window.
 
 The layout **adapts to the pane width** — fields are dropped in order of
 importance, so a 24-column pane degrades gracefully instead of wrapping.
+
+### Rate limits, plan, and account
+
+On a subscription the dollar figures are **notional** — you don't pay them. What
+actually stops you mid-task is the percentage of your rate limit, so the panel
+also shows the **5-hour** and **weekly** windows as meters beside the context
+gauge, each with its real reset time:
+
+```
+ctx  ██········  21%  208.7K/1.0M
+5h   ··········   0%  15:50
+week ██········  21%  Fable  Wed 10:30
+```
+
+The weekly cap in particular is invisible to anything that only reads
+transcripts, and it is usually the one that bites.
+
+These come from **Claude Code's own cache** of the server's limit state
+(`~/.claude.json`), read-only. The monitor **never fetches them itself** — that
+would mean calling Anthropic from a status pane and would break the idle-cost
+promise. It reports how old the cached figure is instead, and marks a percentage
+`~` once it is old enough that it might have moved. The `limits` tab always
+prints the exact age.
+
+Because these are private client internals with no compatibility promise, every
+field is read defensively: if a future release renames or drops one, the row
+disappears and nothing else changes.
+
+Your **plan** (`Max 5x`, `Pro`, `Team`, …) is shown from the same file. Identity
+defaults to a **first name only**, because this pane ends up in screen-shares and
+recordings; `CBM_ACCOUNT=full` opts into the email and organisation name, and
+`CBM_ACCOUNT=0` turns it off entirely.
+
+### Tabs
+
+The header — spend and the three meters — is **pinned to every tab**, so the
+numbers worth watching never need a keystroke. Below it, six views:
+
+| Tab       | What's on it                                                        |
+|-----------|---------------------------------------------------------------------|
+| `live`    | models, agents, burn rate, tokens-per-turn sparkline                |
+| `limits`  | every rate limit with exact reset times, credits, plan, cache age   |
+| `models`  | per model: in/out, cache read/write, the 1h-vs-5m write split, $/turn |
+| `agents`  | the full subagent list with models and last-active times            |
+| `trend`   | 7-day account-wide token history, lifetime totals                   |
+| `account` | who you are, what plan, and what this session is (branch, effort, mode) |
+
+Keys — the pane must have **keyboard focus** first (in tmux, `Ctrl-b` then an
+arrow):
+
+| Key      | Action                        |
+|----------|-------------------------------|
+| `←` `→`  | previous / next tab           |
+| `Tab`    | next tab                      |
+| `1`–`6`  | jump straight to a tab        |
+| `r`      | redraw now                    |
+| `?`      | show the key list once        |
+| `q`      | drop to a shell               |
+
+This costs nothing when idle: the keypress read **replaces** the sleep at the end
+of the watch loop rather than adding to it, so the poll interval is unchanged.
+Without a terminal on stdin it falls back to `sleep` and behaves exactly as
+before. `CBM_TABS=0` restores the single static panel.
 
 ### Pricing
 
