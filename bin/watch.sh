@@ -39,6 +39,51 @@ fi
 
 gray() { printf '\033[90m%s\033[0m\n' "$1"; }
 
+# ---------------------------------------------------------------------------
+# Screen handling. The panel redraws in place, so it belongs on the ALTERNATE
+# screen buffer -- the one vim, less and htop use.
+#
+# This is not cosmetic. Erasing the *primary* buffer does not discard the old
+# frame: terminals scroll it into scrollback first. A panel that redraws on
+# every change therefore stacks a ghost copy of every frame it has ever drawn
+# above the visible one, so scrolling up finds the panel again showing older
+# numbers. The alternate buffer has no scrollback, so there is nothing to
+# accumulate, and leaving it restores whatever the pane showed before.
+#
+# CBM_ALTSCREEN=0 opts out; that path clears scrollback explicitly (\033[3J)
+# instead, which fixes the same ghosting on any terminal that honours it.
+# ---------------------------------------------------------------------------
+altscreen=0
+if [ "${CBM_ALTSCREEN:-1}" != "0" ] && [ -t 1 ] &&
+   [ -n "${TERM:-}" ] && [ "${TERM:-}" != dumb ]; then
+  altscreen=1
+fi
+
+screen_enter() {
+  [ "$altscreen" = 1 ] || return 0
+  printf '\033[?1049h\033[?25l'      # alt buffer, hide the cursor
+}
+
+# Always safe to call, including twice: the pane may become a shell at any
+# point (q, Ctrl-C, a missing data source) and must not inherit a hidden cursor
+# or a screen buffer the shell knows nothing about.
+screen_leave() {
+  [ "$altscreen" = 1 ] || return 0
+  altscreen=0
+  printf '\033[?25h\033[?1049l'
+}
+
+screen_clear() {
+  if [ "$altscreen" = 1 ]; then
+    printf '\033[H\033[J'            # home, erase down: no scroll, no ghost
+  else
+    printf '\033[H\033[2J\033[3J'    # ...and drop the scrollback we just filled
+  fi
+}
+
+# exec replaces this process, so the EXIT trap never runs on that path.
+shell_out() { screen_leave; cbm_exec_shell; }
+
 locate() {
   if [ -n "$transcript" ] && [ -f "$transcript" ]; then return; fi
   transcript="$(find -L "$HOME/.claude/projects" -name "$sid.jsonl" 2>/dev/null | head -1)"
@@ -119,6 +164,13 @@ resized=0
 help_once=0
 trap 'resized=1' WINCH
 
+# From here on the panel owns the screen, so every exit path has to hand it
+# back: the trap covers signals and normal exits, shell_out covers the two
+# paths that exec away instead of exiting.
+screen_enter
+trap 'screen_leave' EXIT
+trap 'shell_out' INT
+
 # Sentinel (not "") so the first iteration always renders — and so a host where
 # stat yields no signature still renders once before idling, rather than never.
 last="__init__"
@@ -126,7 +178,7 @@ force=0
 while true; do
   locate
   if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
-    clear
+    screen_clear
     gray "waiting for session ${sid:0:8} data..."
     if [ "$interactive" = 1 ]; then read_key; else sleep "$poll"; fi
     continue
@@ -150,7 +202,7 @@ while true; do
     last="$sig"
     force=0
     resized=0
-    clear
+    screen_clear
     # The key list is a one-shot: shown on the render right after `?`, gone on
     # the next one, so it can never become clutter in a 25%-width pane.
     if [ "$help_once" = 1 ]; then
@@ -173,6 +225,6 @@ while true; do
     [1-6])   tab=$(( key - 1 ));                   force=1 ;;
     r|R)                                           force=1 ;;
     '?'|h|H) help_once=1;                          force=1 ;;
-    q|Q)     clear; cbm_exec_shell ;;
+    q|Q)     shell_out ;;
   esac
 done

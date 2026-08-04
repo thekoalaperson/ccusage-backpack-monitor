@@ -4,6 +4,52 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-08-04
+
+### Fixed
+- **The ghost panel in scrollback.** Scrolling up in the monitor pane showed a
+  second copy of the panel with older numbers. The panel redraws in place, and
+  erasing the *primary* screen buffer does not discard the old frame — the
+  terminal scrolls it into scrollback first. macOS `clear(1)` makes this exact:
+  it emits `ESC[3J ESC[H ESC[2J`, dropping the scrollback and *then* banking the
+  frame it just erased, which is why precisely one ghost survived every redraw.
+
+  The panel now runs on the **alternate screen buffer**, the one `vim`, `less`
+  and `htop` use. It has no scrollback, so there is nothing to accumulate, and
+  leaving it restores whatever the pane showed before. Every exit path hands the
+  screen back, including `q` and `Ctrl-C`, which `exec` a shell rather than
+  returning. `CBM_ALTSCREEN=0` opts out and clears scrollback *after* erasing
+  instead — the same fix without the buffer switch.
+
+### Changed
+- **Every number now says what it is.** The panel had accumulated bare figures
+  whose meaning you had to remember: a headline dollar amount with no stated
+  scope, `~$121` beside `ends 15:30`, and a weekly limit rendered `Fable Wed
+  10:30` — a scope name butted against a clock, with nothing marking it as a
+  reset. Reset times are sentences now (`Fable · resets Wed 10:30 · 21h left`),
+  the headline reads `session $25.36`, and the burn block is four labelled rows
+  (`rate` / `so far` / `on track` / `window`).
+
+  Phrasings are *reworded* to fit rather than truncated: a heading clipped
+  mid-word ("5h rolling block · all sessi") is worse than no note at all, and
+  below ~40 columns the meter gives up cells so the sentence beside it survives.
+
+- **Tabs advertise their own shortcut.** The strip is numbered (`1 live
+  2 limits …`), so the `1`–`6` jump keys are discoverable instead of being
+  documented only under `?`. The footer names the keys it expects.
+
+- **Each tab reworked around aligned key/value rows and comparable bars.**
+  `models` lays its token counts out as labelled cells sized to their contents
+  rather than to half the pane; `agents` gives every agent a share bar and ends
+  with the you-vs-agents split; `trend` draws a real bar per day with `today`
+  and `yest` named, and separates the lifetime totals under their own `ALL TIME`
+  heading — they sat under `7 DAYS` reading as the week's; `limits` states in
+  plain words that the percentages are account-wide and that they, not the
+  dollars, are what stop you; `account` labels every field.
+
+- `?` explains the `~` marker, which appears on any figure the panel will not
+  vouch for as current or exact.
+
 ## [0.10.0] - 2026-08-04
 
 ### Added

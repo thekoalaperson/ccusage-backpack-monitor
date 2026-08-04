@@ -1129,6 +1129,22 @@ class TestTabs(Base):
                         "tab %s overflows at COLUMNS=%d: %r"
                         % (tab, cols, ansi.sub("", ln)))
 
+    def test_no_row_ends_in_dead_space(self):
+        """A dropped tail must take its separator with it.
+
+        Trailing padding is invisible until you select the pane to copy a
+        number out of it, and then every line has a ragged tail.
+        """
+        sid, path = self._session()
+        self.write_account(limits=[self.limit_row("session", "session", 12)])
+        for cols in (20, 28, 34, 60, 72):
+            for tab in self.TABS:
+                r = self._run(sid, path, tab, {"COLUMNS": str(cols),
+                                               "NO_COLOR": "1"})
+                for ln in r.stdout.splitlines():
+                    self.assertEqual(ln, ln.rstrip(),
+                                     "tab %s @%d: %r" % (tab, cols, ln))
+
     def test_no_color_across_tabs(self):
         sid, path = self._session()
         self.write_account(limits=[self.limit_row("session", "session", 12)])
@@ -1139,8 +1155,18 @@ class TestTabs(Base):
 
     def test_active_tab_is_marked_without_color(self):
         sid, path = self._session()
-        r = self._run(sid, path, "models", {"NO_COLOR": "1"})
-        self.assertIn("[models]", r.stdout)
+        r = self._run(sid, path, "models", {"NO_COLOR": "1", "COLUMNS": "60"})
+        self.assertIn("[3 models]", r.stdout)
+        self.assertIn("2 limits", r.stdout)          # inactive: no brackets
+        self.assertNotIn("[2 limits]", r.stdout)
+
+    def test_tab_numbers_are_visible(self):
+        """The 1-6 shortcut is only useful if the strip advertises it."""
+        sid, path = self._session()
+        r = self._run(sid, path, "live", {"NO_COLOR": "1", "COLUMNS": "60"})
+        strip = [ln for ln in r.stdout.splitlines() if "account" in ln][0]
+        for i, name in enumerate(self.TABS, start=1):
+            self.assertIn("%d %s" % (i, name), strip)
 
     def test_tabs_off_restores_the_static_panel(self):
         sid, path = self._session()
@@ -1196,6 +1222,34 @@ class TestTabs(Base):
         r = self._run(sid, path, "live", {"COLUMNS": "60"})
         self.assertIn("cache", r.stdout)
 
+    def test_a_clock_is_never_shown_without_saying_it_is_a_reset(self):
+        """The reported misread: `week ~21% Fable Wed 10:30`.
+
+        A scope name butted against a bare clock parses as one meaningless
+        blob. Wherever there is room, the reset time is a sentence.
+        """
+        sid, path = self._session()
+        self.write_account(limits=[
+            self.limit_row("session", "session", 12),
+            self.limit_row("weekly_scoped", "weekly", 21, scope="Fable")])
+        for tab in ("live", "limits"):
+            r = self._run(sid, path, tab, {"COLUMNS": "60", "NO_COLOR": "1"})
+            wk = [ln for ln in r.stdout.splitlines() if ln.startswith("week")]
+            self.assertTrue(wk, "no weekly row on %s" % tab)
+            self.assertIn("Fable · resets", wk[0], tab)
+
+    def test_headline_says_what_it_is_the_cost_of(self):
+        """A bare dollar figure got read as the 5h window and as the account."""
+        sid, path = self._session()
+        r = self._run(sid, path, "live", {"COLUMNS": "60", "NO_COLOR": "1"})
+        self.assertRegex(r.stdout, r"^session\s+\$")
+
+    def test_burn_numbers_are_labelled(self):
+        sid, path = self._session()
+        r = self._run(sid, path, "live", {"COLUMNS": "60", "NO_COLOR": "1"})
+        for want in ("BURN", "rate", "on track", "window"):
+            self.assertIn(want, r.stdout, want)
+
 
 def _cpu_seconds(pid):
     """CPU seconds a process has used, via `ps`. None if it can't be read."""
@@ -1242,12 +1296,13 @@ class TestWatchKeys(unittest.TestCase):
                   "XDG_CONFIG_HOME": os.path.join(self.tmp, "config")})
         return e
 
-    def _drive(self, keys, settle=1.2):
+    def _drive(self, keys, settle=1.2, env=None):
         """Run the watcher on a pty, send `keys`, return everything it drew."""
         import pty, select, signal
         pid, fd = pty.fork()
         if pid == 0:                                   # child: the watcher
             os.environ.update(self._env())
+            os.environ.update(env or {})
             try:
                 os.execv("/bin/sh", ["sh", self.watch, self.sid, self.path, "1"])
             finally:
@@ -1305,6 +1360,44 @@ class TestWatchKeys(unittest.TestCase):
         out = self._drive([b"Z"])
         self.assertIn("MODELS", out)
         self.assertNotIn("RATE LIMITS", out)
+
+    def test_redraws_do_not_pile_up_in_scrollback(self):
+        """The ghost-frame report: scroll up, find the panel again, older.
+
+        Erasing the primary buffer scrolls the erased frame into scrollback, so
+        a redraw-in-place panel silently archives every frame it ever drew. The
+        fix is to own the alternate buffer, which has no scrollback at all --
+        and never to clear the primary one while we're on it.
+        """
+        out = self._drive([b"\033[C", b"\033[C"])
+        self.assertIn("\033[?1049h", out, "never entered the alternate buffer")
+        self.assertIn("MODELS", out)
+        # ED2 on the primary buffer is precisely what banks the ghost frame.
+        body = out.split("\033[?1049h", 1)[1]
+        self.assertNotIn("\033[2J", body, "cleared the primary buffer while on alt")
+
+    def test_dropping_to_a_shell_hands_the_screen_back(self):
+        """Leaving the panel must restore the buffer and the cursor, or the
+        shell it execs into inherits an invisible cursor on a screen the user
+        cannot scroll."""
+        out = self._drive([b"q"], env={"SHELL": "/bin/sh"})
+        self.assertIn("\033[?1049l", out)
+        self.assertIn("\033[?25h", out)
+
+    def test_altscreen_opt_out_still_clears_scrollback(self):
+        """Terminals without the alternate buffer must not ghost either.
+
+        Order is the whole fix. `clear(1)` emits ESC[3J ESC[H ESC[2J -- it drops
+        the scrollback and *then* banks the frame it just erased, which is how
+        exactly one ghost copy survives every redraw. The scrollback wipe has to
+        come last.
+        """
+        out = self._drive([b"\033[C"], env={"CBM_ALTSCREEN": "0"})
+        self.assertNotIn("\033[?1049h", out)
+        self.assertIn("\033[3J", out, "left the ghost frame in scrollback")
+        self.assertGreater(out.rfind("\033[3J"), out.rfind("\033[2J"),
+                           "erased the screen after dropping scrollback, "
+                           "which re-banks the frame it just erased")
 
     def test_no_tty_does_not_spin(self):
         """Without a terminal, `read` fails instantly -- if that became the

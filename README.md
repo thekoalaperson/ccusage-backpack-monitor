@@ -16,7 +16,7 @@ It works in **tmux**, **WezTerm**, and **iTerm2**, on **macOS and Linux**.
        alt="A live ccusage cost pane — spend, per-model breakdown, burn rate, and a tokens-per-turn sparkline — in a side pane beside a Claude Code session">
 </p>
 
-> **Status:** v0.10.0 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
+> **Status:** v0.11.0 — supports tmux (macOS/Linux), WezTerm (macOS/Linux), and
 > iTerm2 (macOS). In any other terminal the hooks no-op silently, so it's safe
 > to install anywhere.
 
@@ -134,6 +134,7 @@ Set these as environment variables before launching `claude`:
 | `NO_COLOR`           | _(unset)_     | Set (any value) to disable ANSI color entirely ([no-color.org](https://no-color.org)). `CBM_BG` overrides it. |
 | `CBM_NO_NETWORK`     | _(unset)_     | `1` pins pricing to the bundled table (no daily refresh) |
 | `CBM_BG`             | _(unset)_     | A 256-color index (e.g. `234`) paints an opaque background card behind the panel — useful in **transparent terminals**. Unset = solid high-contrast text, no fill. |
+| `CBM_ALTSCREEN`      | `1`           | The panel draws on the terminal's **alternate screen**, like `vim` or `less`, so redraws leave nothing in scrollback. `0` draws on the primary buffer instead and clears scrollback after each frame. |
 
 The panel shows **every model used in the session** — including those used by
 subagents — with its own cost, a cost-share bar, and token count. When a session
@@ -206,10 +207,24 @@ arrow):
 | `?`      | show the key list once        |
 | `q`      | drop to a shell               |
 
+The strip is numbered (`1 live  2 limits  …`) so the jump keys are visible
+without asking for help, and the active tab is highlighted — bracketed under
+`NO_COLOR`.
+
 This costs nothing when idle: the keypress read **replaces** the sleep at the end
 of the watch loop rather than adding to it, so the poll interval is unchanged.
 Without a terminal on stdin it falls back to `sleep` and behaves exactly as
 before. `CBM_TABS=0` restores the single static panel.
+
+A `~` anywhere on the panel means the same thing throughout: a figure we will
+not vouch for as current or exact — an estimated rate, or a cached limit old
+enough to have moved. The `limits` tab always prints the cache's exact age
+regardless.
+
+Because the panel redraws in place, it runs on the terminal's **alternate
+screen** (as `vim` and `less` do), so nothing it draws is ever left behind in
+scrollback. Leaving it — `q`, `Ctrl-C`, or the session ending — restores the
+pane. See `CBM_ALTSCREEN` if your terminal doesn't support it.
 
 ### Pricing
 
