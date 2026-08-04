@@ -17,8 +17,13 @@ Three things this gets right that the subprocess did not:
 """
 import json, os, glob, time
 
-SCAN_CACHE_VERSION = 4
+SCAN_CACHE_VERSION = 5
 SCAN_CACHE_MAX = 600      # entries; oldest-touched evicted beyond this
+
+# One shape for a per-model tally, so scan_file and _merge can never drift apart
+# and silently drop a field on the way up.
+MODEL_ZERO = {"cost": 0.0, "input": 0, "output": 0, "cache_read": 0,
+              "cache_creation": 0, "cache_5m": 0, "cache_1h": 0, "turns": 0}
 
 
 def _state_dir():
@@ -102,16 +107,25 @@ class Scanner:
         outputs = []
         hours = {}      # epoch-hour -> cost, so a rolling window can sum slices
         team = agent = cwd = None
+        # Session identity, for the panel's reference footer. Every one of these
+        # rides on a line we already parse, or on a line type that appears a
+        # handful of times per session -- never on the hot path. Adding
+        # `"gitBranch"` to the prefilter instead would parse *every* line, which
+        # on a 270 MB transcript is the whole reason this scanner exists.
+        title = branch = version = effort = pmode = None
         last = 0.0
         first = 0.0
         last_ctx = None
+        last_cost = 0.0
         try:
             with open(path, "r", errors="ignore") as f:
                 for line in f:
                     # Cheap prefilter: most lines are user turns / tool results.
                     if '"usage"' not in line:
                         if ('"teamName"' in line or '"agentName"' in line
-                                or '"agentSetting"' in line or ('"cwd"' in line and not cwd)):
+                                or '"agentSetting"' in line or '"aiTitle"' in line
+                                or '"permissionMode"' in line
+                                or ('"cwd"' in line and not cwd)):
                             try:
                                 o = json.loads(line)
                             except Exception:
@@ -119,6 +133,8 @@ class Scanner:
                             team = o.get("teamName") or team
                             agent = o.get("agentName") or agent or o.get("agentSetting")
                             cwd = cwd or o.get("cwd")
+                            title = o.get("aiTitle") or title
+                            pmode = o.get("permissionMode") or pmode
                         continue
                     try:
                         o = json.loads(line)
@@ -126,6 +142,11 @@ class Scanner:
                         continue
                     team = o.get("teamName") or team
                     agent = o.get("agentName") or agent
+                    # Free: this line is already parsed and carries all of it.
+                    cwd = cwd or o.get("cwd")
+                    branch = o.get("gitBranch") or branch
+                    version = o.get("version") or version
+                    effort = o.get("effort") or effort
                     if o.get("type") != "assistant":
                         continue
                     msg = o.get("message")
@@ -141,9 +162,7 @@ class Scanner:
                             continue
                         seen.add(key)
                     name = msg.get("model") or "unknown"
-                    m = models.setdefault(name, {"cost": 0.0, "input": 0, "output": 0,
-                                                 "cache_read": 0, "cache_creation": 0,
-                                                 "turns": 0})
+                    m = models.setdefault(name, dict(MODEL_ZERO))
                     c = self.pricing.cost(name, u)
                     m["cost"] += c
                     m["input"] += u.get("input_tokens") or 0
@@ -151,6 +170,19 @@ class Scanner:
                     m["cache_read"] += u.get("cache_read_input_tokens") or 0
                     m["cache_creation"] += u.get("cache_creation_input_tokens") or 0
                     m["turns"] += 1
+                    # Cache writes split by TTL. Same derivation as pricing.cost
+                    # (1h costs 2x input, 5m costs 1.25x) so the detail view can
+                    # show *why* a cache-heavy session cost what it did.
+                    c5 = c1h = 0
+                    cc = u.get("cache_creation")
+                    if isinstance(cc, dict):
+                        c5 = cc.get("ephemeral_5m_input_tokens") or 0
+                        c1h = cc.get("ephemeral_1h_input_tokens") or 0
+                    if not (c5 or c1h):
+                        c5 = u.get("cache_creation_input_tokens") or 0
+                    m["cache_5m"] += c5
+                    m["cache_1h"] += c1h
+                    last_cost = c
                     outputs.append(u.get("output_tokens") or 0)
                     # Context in play on the most recent turn: everything the
                     # model read this request (fresh + cached), which is what
@@ -174,7 +206,10 @@ class Scanner:
 
         data = {"team": team, "agent": agent, "cwd": cwd, "models": models,
                 "outputs": outputs[-256:], "hours": hours,
-                "first": first, "last": last, "last_ctx": last_ctx}
+                "first": first, "last": last, "last_ctx": last_ctx,
+                "last_cost": last_cost,
+                "title": title, "branch": branch, "version": version,
+                "effort": effort, "pmode": pmode}
         self._cache["files"][path] = {"sig": sig, "data": data,
                                       "seen": int(time.time())}
         self._dirty = True
@@ -211,7 +246,8 @@ class Scanner:
         """Total a session: its own transcript plus every subagent it spawned."""
         result = {"models": {}, "agents": [], "outputs": [], "cost": 0.0,
                   "tokens": 0, "self_cost": 0.0, "agent_cost": 0.0,
-                  "context": None}
+                  "context": None, "meta": {}, "last_cost": 0.0,
+                  "started": 0.0, "updated": 0.0}
         if not transcript or not os.path.exists(transcript):
             return result
 
@@ -223,6 +259,11 @@ class Scanner:
             result["context"] = own.get("last_ctx")
             result["self_cost"] = sum(m["cost"] for m in own["models"].values())
             started = own.get("first") or 0.0
+            result["started"] = started
+            result["updated"] = own.get("last") or 0.0
+            result["last_cost"] = own.get("last_cost") or 0.0
+            result["meta"] = {k: own.get(k) for k in
+                              ("title", "branch", "version", "effort", "pmode", "cwd")}
 
         paths = list(self.subagent_files(sid, transcript))
 
@@ -502,8 +543,7 @@ def _agent_label(path):
 
 def _merge(dst, src):
     for name, m in src.items():
-        d = dst.setdefault(name, {"cost": 0.0, "input": 0, "output": 0,
-                                  "cache_read": 0, "cache_creation": 0, "turns": 0})
+        d = dst.setdefault(name, dict(MODEL_ZERO))
         for k in d:
             d[k] += m.get(k, 0)
 

@@ -4,6 +4,70 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-08-04
+
+### Added
+- **Rate-limit meters — the numbers that actually stop you.** On a subscription
+  the dollar figures are notional; what blocks you mid-task is the percentage of
+  your limit. The panel now shows the **5-hour** and **weekly** windows as
+  meters beside the context gauge, each with its real reset time. The weekly cap
+  is invisible to anything that only reads transcripts, and it is usually the
+  one that bites.
+
+  These are read from Claude Code's own cache of the server's limit state
+  (`~/.claude.json`), **read-only and never fetched** — polling Anthropic from a
+  status pane would break the idle-cost promise. The age of the cached figure is
+  reported instead, and a percentage is marked `~` once it is old enough to have
+  moved. Every field is read defensively: these are private client internals, so
+  a future rename makes a row disappear rather than breaking the panel.
+- **Tabs, navigable with the arrow keys.** The header (spend + all three meters)
+  is pinned to every tab, so the numbers worth watching never need a keystroke.
+  Six views: `live`, `limits`, `models`, `agents`, `trend`, `account`. Also
+  `Tab`, `1`–`6` to jump, `r` to redraw, `?` for the key list, `q` for a shell.
+
+  This costs nothing when idle: the keypress read **replaces** the `sleep` at the
+  end of the watch loop rather than adding to it, so the poll interval is
+  unchanged. Verified at ~0s CPU over a 4-second idle window. With no terminal on
+  stdin it falls back to `sleep` — without that guard `read` would fail instantly
+  and turn the poll into a busy loop. `CBM_TABS=0` restores the static panel.
+- **Plan and account identity.** Your plan (`Max 5x`, `Pro`, `Team`, …) and name
+  appear in the footer. Identity defaults to a **first name only** — this pane
+  ends up in screen-shares and recordings. `CBM_ACCOUNT=full` opts into email and
+  organisation; `CBM_ACCOUNT=0` turns it off.
+- **Detail the panel never had room for.** Cache hit rate (the single biggest
+  lever on session cost) now rides on an existing line; the `models` tab adds
+  per-model in/out, cache read/write, the 1h-vs-5m write split and $/turn; the
+  `trend` tab surfaces the 7-day account history from `stats-cache.json`; the
+  `account` tab shows the session's title, branch, effort and permission mode.
+- Terminal resize (`SIGWINCH`) now redraws, instead of leaving the panel laid out
+  for the old pane width.
+
+### Changed
+- Layout reordered live → reference: spend, then the three meters as one aligned
+  block (ordered by how soon each one hurts: ctx fills in minutes, 5h in hours,
+  the week in days), then models and agents, then a dimmed identity footer below
+  a rule. Colour is now reserved for things that can go wrong.
+- The local 5-hour dollar total is dropped from the burn line **when** the
+  server's own 5h percentage is available, since the meter covers that window. It
+  returns automatically when the cache is absent.
+
+### Internal
+- Arrow keys are parsed for both normal (`ESC [ C`) and **application cursor
+  mode** (`ESC O C`); tmux and some terminals send the latter. macOS ships bash
+  3.2, which rejects a fractional `read -t`, so the tail of an escape sequence is
+  read with an integer timeout — those bytes arrive in the same burst, so it
+  returns immediately.
+- Session identity (title, branch, version, effort, permission mode) is scanned
+  only from lines already parsed or from line types that appear a handful of
+  times per session. Adding `gitBranch` to the prefilter would have parsed every
+  line — the exact cost this scanner exists to avoid.
+- The test suite now sandboxes `HOME`. Without it the panel tests read the
+  developer's real account file, leaking their plan and email into test output
+  and giving a different answer per machine. 31 new tests (61 → 92), including
+  pty-driven coverage of the key loop and a guard that the watcher does not spin
+  when stdin is not a terminal.
+- Scan-cache version bumped to 5 (per-model cache-TTL split, session identity).
+
 ## [0.9.3] - 2026-08-04
 
 ### Fixed
@@ -29,7 +93,6 @@ project uses [Semantic Versioning](https://semver.org/).
   turns out to be following an agent. Panes opened deliberately with
   `/ccusage-monitor` are never closed this way and keep their existing behaviour
   of naming the agent and its parent session.
-
 ## [0.9.2] - 2026-08-02
 
 ### Fixed
