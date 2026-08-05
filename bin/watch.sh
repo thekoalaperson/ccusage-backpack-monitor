@@ -230,6 +230,8 @@ self_sig="$(cbm_stat_sig "$0" 2>/dev/null)"
 last="__init__"
 force=0
 waiting=0
+retire_ticks=0
+retire_misses=0
 while true; do
   locate
   if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
@@ -243,6 +245,32 @@ while true; do
     continue
   fi
   waiting=0
+
+  # See ourselves out when the session we follow is over.
+  #
+  # Closing this pane is the SessionEnd hook's job, but a hook is not a
+  # guarantee: it runs while the session tears down and can be cut short, and
+  # then the pane stays on screen after the session that owns it is gone. The
+  # pane is the one thing still running at that point, so it checks.
+  #
+  # Costs one grep a minute, and only when there is a transcript to watch. Three
+  # consecutive misses before acting, so a registry that briefly does not list
+  # us -- a resume, a rewritten entry -- cannot retire a live pane.
+  retire_ticks=$((retire_ticks + 1))
+  if [ "$retire_ticks" -ge "${CBM_RETIRE_CHECK:-20}" ]; then
+    retire_ticks=0
+    cbm_session_is_live "$sid"
+    if [ $? = 1 ]; then
+      retire_misses=$((retire_misses + 1))
+      if [ "$retire_misses" -ge 3 ]; then
+        screen_leave
+        cbm_close_own_pane "$sid"
+        exit 0
+      fi
+    else
+      retire_misses=0
+    fi
+  fi
 
   # The race the hook cannot win: at SessionStart a teammate's transcript may
   # still be empty, which is indistinguishable from a brand-new human session.

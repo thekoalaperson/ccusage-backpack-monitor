@@ -7,6 +7,25 @@ project uses [Semantic Versioning](https://semver.org/).
 ## [0.11.0] - 2026-08-04
 
 ### Fixed
+- **A pane could outlive the session it was watching.** Closing the pane is the
+  `SessionEnd` hook's job, but a hook is not a guarantee — it runs while the
+  session is tearing down and can be cut short. When that happened the pane
+  stayed on screen after the session ended, and worse: the hook unlinked the
+  pane's state file *before* closing it, so a failed close left a pane that
+  nothing could ever find again. No toggle, no sweep and no later hook can
+  reach a pane with no record, and the only way out was closing it by hand.
+
+  The state file now outlives a failed close — the pane is closed, verified,
+  retried once, and only forgotten once it is really gone — so a failure
+  becomes a retry rather than an orphan.
+
+  And the pane no longer depends on the hook at all. It is the one thing still
+  running when a session ends, so it checks: if Claude Code's live-session
+  registry no longer lists the session it follows, it sees itself out. Three
+  consecutive misses are required, and a machine with no registry (older Claude
+  Code) yields *unknown* rather than *ended*, so a pane is never retired on an
+  absence of evidence. Costs one `grep` a minute.
+
 - **`/ccusage-monitor` could close another session's pane.** The slash command
   runs without `$CLAUDE_SESSION_ID`, so it worked out which session it belonged
   to by taking the most recently written transcript recorded against `$PWD`.

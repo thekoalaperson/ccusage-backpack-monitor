@@ -612,14 +612,60 @@ cbm_is_agent_session() {  # $1=transcript path
 # Close the pane recorded for $1 and forget it. Shared by the SessionEnd hook and
 # by a watcher that has worked out it should never have been opened.
 cbm_close_own_pane() {  # $1=sid
-  local f backend handle
+  local f
   f="$(cbm_state_dir)/$1.pane"
+  [ -f "$f" ] || return 0
+  cbm_close_recorded_pane "$f"
+}
+
+# Close the pane a state file describes, and only then forget it.
+#
+# The order is the whole point. Removing the state file first -- which this did
+# -- means any failure to close leaves a pane on screen that NOTHING can ever
+# find again: no state file, so no toggle, no sweep and no hook can reach it,
+# and the user is left closing it by hand. Closing first, verifying, and
+# unlinking only once the pane is really gone makes a failed close a retry
+# instead of an orphan.
+cbm_close_recorded_pane() {  # $1=state file -> 0 when the pane is gone
+  local f="$1" backend handle
   [ -f "$f" ] || return 0
   backend="$(cbm_state_backend "$f")"
   handle="$(cbm_state_handle "$f")"
-  rm -f "$f"
-  [ -n "$handle" ] || return 0
+  if [ -z "$handle" ]; then
+    rm -f "$f"                          # nothing to close; the record is junk
+    return 0
+  fi
   cbm_pane_close "$handle" "$backend"
+  # One retry: at session teardown the terminal can be mid-quit and refuse the
+  # first attempt, which is precisely when nobody is left to try again.
+  if cbm_pane_alive "$handle" "$backend"; then
+    cbm_pane_close "$handle" "$backend"
+  fi
+  if cbm_pane_alive "$handle" "$backend"; then
+    return 1                            # still there: keep the record for later
+  fi
+  rm -f "$f"
+  return 0
+}
+
+# Is Claude Code still running the session $1?
+#   0 = live   1 = ended   2 = unknown (no registry to consult)
+#
+# "Unknown" is a distinct answer on purpose: an older Claude Code keeps no
+# ~/.claude/sessions registry, and reading "no entry" as "ended" there would
+# retire every pane on the machine. Only an entry's ABSENCE FROM A REGISTRY
+# THAT IS OTHERWISE IN USE means the session is over.
+cbm_session_is_live() {  # $1=sid
+  local want="$1" dir found pid
+  dir="$HOME/.claude/sessions"
+  [ -d "$dir" ] || return 2
+  ls "$dir"/*.json >/dev/null 2>&1 || return 2
+  found="$(grep -lE "\"sessionId\"[[:space:]]*:[[:space:]]*\"$want\"" \
+           "$dir"/*.json 2>/dev/null | head -1)"
+  [ -n "$found" ] || return 1
+  pid="$(basename "$found" .json)"
+  cbm_session_of_pid "$pid" >/dev/null 2>&1 && return 0
+  return 1
 }
 
 # Portable change-signature for a file: "<mtime>-<size>". GNU stat FIRST —

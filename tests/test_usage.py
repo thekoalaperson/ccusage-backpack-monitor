@@ -747,6 +747,50 @@ kill() { return 0; }
 ps() { case "$*" in *comm*) echo claude ;; *) command ps "$@" ;; esac; }
 '''
 
+    def test_a_failed_close_keeps_the_pane_findable(self):
+        """The pane that would not close, and then could not be closed at all.
+
+        A SessionEnd hook runs while the session is tearing down and can be cut
+        short. Unlinking the state file before closing turned that into a pane
+        nothing could ever find again — no toggle, no sweep and no later hook
+        can reach a pane with no record. So the record outlives a failed close.
+        """
+        out, r = self._sh('''
+cbm_close_iterm() { return 0; }          # "succeeds", but the pane stays
+cbm_alive_iterm() { return 0; }
+printf 'iterm\\nHANDLE-STUCK\\n%s\\n\\n' "$(cbm_plugin_root)" > "$f"
+cbm_close_recorded_pane "$f"; echo "rc=[$?]"
+[ -f "$f" ] && echo "record=kept" || echo "record=LOST"
+''')
+        self.assertIn("rc=[1]", out, r.stderr)
+        self.assertIn("record=kept", out, r.stderr)
+
+    def test_a_successful_close_forgets_the_pane(self):
+        out, r = self._sh('''
+printf 'iterm\\nHANDLE-GOING\\n%s\\n\\n' "$(cbm_plugin_root)" > "$f"
+cbm_alive_iterm() { return 1; }          # gone after the close
+cbm_close_recorded_pane "$f"; echo "rc=[$?]"
+[ -f "$f" ] && echo "record=kept" || echo "record=gone"
+''')
+        self.assertIn("rc=[0]", out, r.stderr)
+        self.assertIn("record=gone", out, r.stderr)
+
+    def test_a_session_is_never_declared_over_without_a_registry(self):
+        """Older Claude Code keeps no ~/.claude/sessions. Reading "no entry"
+        as "ended" there would retire every pane on the machine."""
+        out, r = self._sh('''
+cbm_session_is_live "whatever"; echo "rc=$?"
+''', home=self.tmp)
+        self.assertIn("rc=2", out, r.stderr)      # unknown, not ended
+
+    def test_a_session_missing_from_a_live_registry_has_ended(self):
+        out, r = self._sh(self.NEIGHBOUR + '''
+cbm_session_is_live "neighbour-session"; echo "live=$?"
+cbm_session_is_live "long-gone-session"; echo "gone=$?"
+''', home=self.tmp)
+        self.assertIn("live=0", out, r.stderr)
+        self.assertIn("gone=1", out, r.stderr)
+
     def test_the_owning_session_is_read_from_the_process_tree(self):
         """Which session is this? Asked of Claude Code, never inferred.
 
@@ -1330,6 +1374,53 @@ def _cpu_seconds(pid):
         return mins * 60 + float(ss)
     except ValueError:
         return None
+
+
+class TestPaneRetires(Base):
+    """A pane outliving its session, and refusing to outlive the check for one.
+
+    Closing the pane is the SessionEnd hook's job, but the hook runs while the
+    session tears down and can be cut short — which left a pane on screen after
+    the session that owned it was gone. The pane is the one thing still running
+    at that point, so it watches for its own session ending.
+    """
+
+    def _run(self, sessions=None, seconds=12):
+        home = os.path.join(self.tmp, "home")
+        proj = os.path.join(home, ".claude", "projects", "p")
+        os.makedirs(proj, exist_ok=True)
+        sid = "watched0-0000-0000-0000-000000000000"
+        path = os.path.join(proj, sid + ".jsonl")
+        write(path, [msg("claude-opus-5", "m1", out=1000)])
+        for pid, entry in (sessions or {}).items():
+            d = os.path.join(home, ".claude", "sessions")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "%s.json" % pid), "w") as fh:
+                json.dump(entry, fh)
+        e = dict(os.environ)
+        e.update({"HOME": home, "CBM_NO_NETWORK": "1", "CBM_RETIRE_CHECK": "1",
+                  "XDG_STATE_HOME": os.path.join(self.tmp, "state"),
+                  "XDG_CONFIG_HOME": os.path.join(self.tmp, "config")})
+        watch = os.path.abspath(os.path.join(HERE, "..", "bin", "watch.sh"))
+        try:
+            r = subprocess.run(["bash", watch, sid, path, "1", "manual"],
+                               capture_output=True, text=True, env=e,
+                               timeout=seconds)
+            return r.returncode
+        except subprocess.TimeoutExpired:
+            return None                       # still running
+
+    def test_the_pane_retires_when_its_session_has_ended(self):
+        """A registry that lists other sessions but not ours: we are over."""
+        rc = self._run(sessions={4242: {"pid": 4242,
+                                        "sessionId": "somebody-else"}})
+        self.assertEqual(rc, 0, "pane kept running after its session ended")
+
+    def test_the_pane_stays_when_there_is_no_registry_to_consult(self):
+        """No ~/.claude/sessions at all (older Claude Code) means unknown, and
+        unknown must never retire a pane the user is watching."""
+        self.assertIsNone(self._run(seconds=8),
+                          "retired a live pane on no evidence")
 
 
 class TestWatchKeys(unittest.TestCase):
