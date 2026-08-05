@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
-## [0.11.0] - 2026-08-04
+## [0.11.0] - 2026-08-05
 
 ### Fixed
 - **A pane could outlive the session it was watching.** Closing the pane is the
