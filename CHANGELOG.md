@@ -7,6 +7,25 @@ project uses [Semantic Versioning](https://semver.org/).
 ## [0.11.0] - 2026-08-04
 
 ### Fixed
+- **`/ccusage-monitor` could close another session's pane.** The slash command
+  runs without `$CLAUDE_SESSION_ID`, so it worked out which session it belonged
+  to by taking the most recently written transcript recorded against `$PWD`.
+  With two Claude sessions running in the same directory that is a coin toss,
+  and losing it meant resolving to the *neighbouring* session — then toggling
+  its monitor pane shut, in a window the user was not even looking at.
+
+  The session id is no longer inferred. Claude Code registers every live session
+  as `~/.claude/sessions/<pid>.json`, so the command walks up its own process
+  ancestry to the `claude` that spawned it and reads the id straight out. Exact,
+  and indifferent to how many sessions share a directory.
+
+  Because a wrong answer here is so costly, the guarantee no longer depends on
+  getting it right: pane state files now record the pid of the session that
+  opened them, and **a pane owned by a different live Claude session is never
+  closed, never reopened, never swept by the stale-state prune, and never has
+  its state file deleted** — whatever session id was resolved. Where that would
+  once have closed a pane, the command now leaves it alone and says so. Panes
+  whose owning session has exited are still reclaimed, so nothing is stranded.
 - **The ghost panel in scrollback.** Scrolling up in the monitor pane found the
   panel again, showing older numbers. A terminal banks a line into scrollback
   when that line leaves the screen — on a scroll, or when an application hands

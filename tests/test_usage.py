@@ -712,7 +712,7 @@ cbm_toggle_pane "$sid" "$trans" >/dev/null
 echo "lines=$(wc -l < "$f" | tr -d ' ')"
 echo "root=$(cbm_state_root "$f")"
 ''')
-        self.assertIn("lines=3", out, r.stderr)
+        self.assertIn("lines=4", out, r.stderr)   # + the owning session's pid
         self.assertIn("root=%s" % os.path.abspath(os.path.join(LIB, "..")), out)
 
     def test_pane_keyed_under_an_agent_id_is_closed_too(self):
@@ -736,6 +736,70 @@ ls "$(cbm_state_dir)" | grep -c pane | sed 's/^/panes=/'
 ''' % agent_sid, home=self.tmp)
         self.assertIn("rc=4", out, r.stderr)     # cleaned up + reopened
         self.assertIn("panes=1", out, r.stderr)  # exactly one pane remains
+
+    # A live Claude session, as Claude Code records it: ~/.claude/sessions/
+    # <pid>.json. `ps` and `kill` are stubbed so a made-up pid can be "alive".
+    NEIGHBOUR = r'''
+mkdir -p "$HOME/.claude/sessions"
+printf '{"pid":4242,"sessionId":"neighbour-session","cwd":"/somewhere"}' \
+  > "$HOME/.claude/sessions/4242.json"
+kill() { return 0; }
+ps() { case "$*" in *comm*) echo claude ;; *) command ps "$@" ;; esac; }
+'''
+
+    def test_the_owning_session_is_read_from_the_process_tree(self):
+        """Which session is this? Asked of Claude Code, never inferred.
+
+        Slash commands run without $CLAUDE_SESSION_ID and the fallback picks the
+        newest transcript recorded against $PWD — which is a coin toss once two
+        sessions share a directory, and it came up wrong: the command closed a
+        neighbouring session's pane. Claude Code registers every live session
+        under its pid, so walk up to the claude that spawned us and read it.
+        """
+        out, r = self._sh('''
+mkdir -p "$HOME/.claude/sessions"
+printf '{"pid":%s,"sessionId":"mine-0000-0000"}' "$$" > "$HOME/.claude/sessions/$$.json"
+ps() { case "$*" in *comm*) echo claude ;; *) command ps "$@" ;; esac; }
+echo "sid=$(cbm_owner_sid)"
+echo "pid=$(cbm_owner_pid)/$$"
+''', home=self.tmp)
+        self.assertIn("sid=mine-0000-0000", out, r.stderr)
+
+    def test_a_pane_owned_by_another_live_session_is_never_closed(self):
+        """The invariant, independent of how the session id was arrived at.
+
+        Even handed the neighbour's own session id — precisely what a wrong
+        resolution looks like — the toggle must not touch their pane, delete
+        their state file, or open a monitor onto their session.
+        """
+        out, r = self._sh(self.NEIGHBOUR + '''
+printf 'iterm\\nHANDLE-THEIRS\\n%s\\n4242\\n' "$(cbm_plugin_root)" > "$f"
+cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+grep -q HANDLE-THEIRS "$f" && echo "theirs=kept" || echo "theirs=LOST"
+''', home=self.tmp)
+        self.assertIn("rc=5", out, r.stderr)          # left alone, said so
+        self.assertIn("theirs=kept", out, r.stderr)
+
+    def test_a_neighbours_pane_survives_the_stale_state_sweep(self):
+        """Panes are also forgotten by age. A live session's never is: losing
+        the handle leaves them a monitor they can no longer toggle off."""
+        out, r = self._sh(self.NEIGHBOUR + '''
+theirs="$(cbm_state_dir)/neighbour-session.pane"
+printf 'iterm\\nHANDLE-THEIRS\\n%s\\n4242\\n' "$(cbm_plugin_root)" > "$theirs"
+touch -t 200001010000 "$theirs"
+cbm_toggle_pane "$sid" "$trans" >/dev/null; echo "rc=$?"
+[ -f "$theirs" ] && echo "theirs=kept" || echo "theirs=SWEPT"
+''', home=self.tmp)
+        self.assertIn("theirs=kept", out, r.stderr)
+
+    def test_a_pane_whose_session_has_exited_is_still_reclaimed(self):
+        """The guard protects live neighbours, not abandoned panes — otherwise
+        every pane left by a session that has since quit would be untouchable."""
+        out, r = self._sh('''
+printf 'iterm\\nHANDLE-ORPHAN\\n%s\\n999999\\n' "$(cbm_plugin_root)" > "$f"
+cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+''', home=self.tmp)
+        self.assertIn("rc=3", out, r.stderr)          # ours to close
 
     def test_other_sessions_panes_are_left_alone(self):
         """Several Claude sessions run side by side; don't close their monitors."""

@@ -121,6 +121,13 @@ cbm_session_panes() {  # $1=sid
     be="$(cbm_state_backend "$f")"
     h="$(cbm_state_handle "$f")"
     root="$(cbm_state_root "$f")"
+    # Checked before anything else, including the liveness prune: a pane owned
+    # by another running session is not ours to close, to reopen, or to forget
+    # the state file of. This is the backstop for a session id resolved wrongly
+    # -- which has happened, and cost somebody else their monitor.
+    if cbm_pane_is_foreign "$f"; then
+      continue
+    fi
     if [ -z "$h" ] || ! cbm_pane_alive "$h" "$be"; then
       rm -f "$f"                        # self-healing: drop dead entries
       continue
@@ -139,7 +146,7 @@ cbm_session_panes() {  # $1=sid
 # Toggle the monitor pane for a session, which is what a user pressing the same
 # command twice actually expects. Exit codes let the caller report precisely:
 #   0 opened     3 closed     4 restarted (stale version, or duplicates cleaned)
-#   1 could not open
+#   1 could not open        5 belongs to another live session -> left alone
 # Panes belonging to OTHER sessions are never touched — several Claude sessions
 # commonly run side by side, each with its own monitor.
 cbm_toggle_pane() {  # $1=sid  $2=trans
@@ -149,6 +156,12 @@ cbm_toggle_pane() {  # $1=sid  $2=trans
   local state cur panes count clean psid pbe ph proot
   state="$(cbm_state_dir)"
   cur="$(cbm_plugin_root)"
+
+  # This session id resolved to somebody else's live Claude process. Their pane
+  # is not ours to close, and a pane we opened for their session would report
+  # their spend as ours. Both are worse than doing nothing.
+  cbm_pane_is_foreign "$state/$sid.pane" && return 5
+
   panes="$(cbm_session_panes "$sid")"
 
   if [ -n "$panes" ]; then
@@ -230,8 +243,76 @@ cbm_dispatch_ok() {  # $1=op (open|alive|close)  $2=backend
 # must close via the RECORDED backend, never by re-detecting. Pre-0.6 files were
 # a single line (a bare iTerm session id) — those are read as backend=iterm.
 # ---------------------------------------------------------------------------
-cbm_state_write() {  # $1=path $2=backend $3=handle [$4=plugin root]
-  printf '%s\n%s\n%s\n' "$2" "$3" "${4:-$(cbm_plugin_root)}" > "$1"
+cbm_state_write() {  # $1=path $2=backend $3=handle [$4=plugin root] [$5=owner pid]
+  printf '%s\n%s\n%s\n%s\n' "$2" "$3" "${4:-$(cbm_plugin_root)}" \
+    "${5-$(cbm_owner_pid)}" > "$1"
+}
+
+# ---------------------------------------------------------------------------
+# Which Claude session owns this process
+#
+# Slash commands run without $CLAUDE_SESSION_ID, and the fallback -- the newest
+# transcript recorded against this cwd -- is a coin toss the moment two Claude
+# sessions run in the same directory. It lost that toss and closed the OTHER
+# session's monitor pane. Nothing this tool does is worth reaching into another
+# session, so it does not guess any more.
+#
+# Claude Code keeps ~/.claude/sessions/<pid>.json for every live session, which
+# makes the answer exact: walk our own ancestry to the claude process that
+# spawned us and read its id. Absent (older Claude Code), callers fall back to
+# the heuristics as before -- but with cbm_pane_is_foreign still standing over
+# them, so a wrong guess can cost a pane of ours and never one of somebody
+# else's.
+# ---------------------------------------------------------------------------
+
+# The session id owned by $1, or nothing if $1 is not a live Claude session.
+# The file outlives the process it describes, so liveness is checked too: a pid
+# whose number has since been recycled must never be mistaken for the session
+# that used to hold it.
+cbm_session_of_pid() {  # $1=pid -> session id | empty
+  local pid="$1" f
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  f="$HOME/.claude/sessions/$pid.json"
+  [ -f "$f" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  case "$(ps -o comm= -p "$pid" 2>/dev/null)" in
+    *claude*) ;;
+    *) return 1 ;;                      # recycled pid wearing a dead session's file
+  esac
+  cbm_json_field sessionId < "$f"
+}
+
+# The pid of the Claude Code process we are running under, walking up from here.
+cbm_owner_pid() {
+  local pid=$$ depth=0
+  while [ "$depth" -lt 12 ]; do
+    case "$pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
+    if cbm_session_of_pid "$pid" >/dev/null 2>&1; then printf '%s' "$pid"; return 0; fi
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# The session id of the Claude Code process we are running under.
+cbm_owner_sid() {
+  local pid
+  pid="$(cbm_owner_pid)" || return 1
+  cbm_session_of_pid "$pid"
+}
+
+# True when this pane belongs to a DIFFERENT session that is still running.
+# Such a pane is untouchable: somebody is watching it, and it is not us. A pane
+# whose owner has exited is an orphan and may be cleaned up, and a pane written
+# before owners were recorded is unknowable -- neither is anyone else's to lose.
+cbm_pane_is_foreign() {  # $1=state file
+  local owner mine
+  owner="$(cbm_state_owner "$1")"
+  [ -n "$owner" ] || return 1
+  cbm_session_of_pid "$owner" >/dev/null 2>&1 || return 1
+  mine="$(cbm_owner_pid 2>/dev/null)"
+  [ -n "$mine" ] && [ "$mine" = "$owner" ] && return 1
+  return 0
 }
 
 # Absolute path of the plugin directory that owns this common.sh. Under the
@@ -253,6 +334,9 @@ cbm_plugin_version() {
 # therefore stale, so the first toggle after upgrading refreshes the pane.
 cbm_state_root() {  # $1=path -> plugin root or empty
   sed -n 3p "$1" 2>/dev/null
+}
+cbm_state_owner() {  # $1=path -> pid of the Claude session that opened it
+  sed -n 4p "$1" 2>/dev/null
 }
 cbm_state_backend() {  # $1=path -> backend id (legacy single-line => iterm)
   local first second
@@ -319,7 +403,11 @@ cbm_open_pane() {  # $1=sid  $2=trans  $3=auto|manual
   state="$(cbm_state_dir)"
 
   # Self-pruning: drop stale state files orphaned by crashes/reboots (>1 day).
-  find "$state" -name '*.pane' -mtime +1 -delete 2>/dev/null
+  # Never a live session's, however old the file: forgetting a pane somebody is
+  # watching leaves them a monitor they can no longer toggle off.
+  find "$state" -name '*.pane' -mtime +1 2>/dev/null | while IFS= read -r old; do
+    cbm_pane_is_foreign "$old" || rm -f "$old"
+  done
 
   # Idempotency: if a live pane already exists for this session, don't reopen.
   # Check the RECORDED backend's handle, not the ambient one.

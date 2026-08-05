@@ -17,12 +17,19 @@ if ! cbm_is_supported; then
 fi
 
 # Identify the current session + transcript. Slash commands run without
-# CLAUDE_SESSION_ID, so this has to be inferred — and inferring it badly is
-# worse than failing, because a subagent transcript rendered as a session shows
-# one agent's spend as the whole session's and looks entirely plausible.
-# resolve-session.py skips agent transcripts, matches on the cwd recorded inside
-# each transcript, and follows a stray agent back to its parent session.
+# CLAUDE_SESSION_ID, so this has to be worked out — and working it out badly is
+# worse than failing: a subagent transcript rendered as a session shows one
+# agent's spend as the whole session's and looks entirely plausible, and a
+# neighbouring session resolved as this one gets its monitor pane closed out
+# from under it.
+#
+# Claude Code tracks its own live sessions by pid, so ask it: cbm_owner_sid
+# walks up to the claude process that spawned this command and reads the id it
+# registered. That is exact, and in particular it does not care that two
+# sessions are running in the same directory, which is what defeated the
+# newest-transcript-for-this-cwd fallback below.
 sid="${CLAUDE_SESSION_ID:-}"
+[ -z "$sid" ] && sid="$(cbm_owner_sid 2>/dev/null)"
 trans=""
 resolver="$here/resolve-session.py"
 py="$(cbm_python)"
@@ -59,6 +66,7 @@ cbm_toggle_pane "$sid" "$trans"
 case $? in
   0) echo "✅ Opened ccusage monitor for session ${sid:0:8}." ;;
   3) echo "◻️  Closed ccusage monitor for session ${sid:0:8}. Run it again to reopen." ;;
+  5) echo "⏭️  Left session ${sid:0:8}'s monitor alone — that session belongs to another running Claude process, not this one." ;;
   4) echo "🔄 Restarted ccusage monitor for session ${sid:0:8} on v$(cbm_plugin_version) (replaced a pane that was stale or duplicated)." ;;
   *) echo "Could not open the pane (backend: $(cbm_backend)). On iTerm2, check Automation permission." ;;
 esac
