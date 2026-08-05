@@ -712,7 +712,7 @@ cbm_toggle_pane "$sid" "$trans" >/dev/null
 echo "lines=$(wc -l < "$f" | tr -d ' ')"
 echo "root=$(cbm_state_root "$f")"
 ''')
-        self.assertIn("lines=3", out, r.stderr)
+        self.assertIn("lines=4", out, r.stderr)   # + the owning session's pid
         self.assertIn("root=%s" % os.path.abspath(os.path.join(LIB, "..")), out)
 
     def test_pane_keyed_under_an_agent_id_is_closed_too(self):
@@ -736,6 +736,114 @@ ls "$(cbm_state_dir)" | grep -c pane | sed 's/^/panes=/'
 ''' % agent_sid, home=self.tmp)
         self.assertIn("rc=4", out, r.stderr)     # cleaned up + reopened
         self.assertIn("panes=1", out, r.stderr)  # exactly one pane remains
+
+    # A live Claude session, as Claude Code records it: ~/.claude/sessions/
+    # <pid>.json. `ps` and `kill` are stubbed so a made-up pid can be "alive".
+    NEIGHBOUR = r'''
+mkdir -p "$HOME/.claude/sessions"
+printf '{"pid":4242,"sessionId":"neighbour-session","cwd":"/somewhere"}' \
+  > "$HOME/.claude/sessions/4242.json"
+kill() { return 0; }
+ps() { case "$*" in *comm*) echo claude ;; *) command ps "$@" ;; esac; }
+'''
+
+    def test_a_failed_close_keeps_the_pane_findable(self):
+        """The pane that would not close, and then could not be closed at all.
+
+        A SessionEnd hook runs while the session is tearing down and can be cut
+        short. Unlinking the state file before closing turned that into a pane
+        nothing could ever find again — no toggle, no sweep and no later hook
+        can reach a pane with no record. So the record outlives a failed close.
+        """
+        out, r = self._sh('''
+cbm_close_iterm() { return 0; }          # "succeeds", but the pane stays
+cbm_alive_iterm() { return 0; }
+printf 'iterm\\nHANDLE-STUCK\\n%s\\n\\n' "$(cbm_plugin_root)" > "$f"
+cbm_close_recorded_pane "$f"; echo "rc=[$?]"
+[ -f "$f" ] && echo "record=kept" || echo "record=LOST"
+''')
+        self.assertIn("rc=[1]", out, r.stderr)
+        self.assertIn("record=kept", out, r.stderr)
+
+    def test_a_successful_close_forgets_the_pane(self):
+        out, r = self._sh('''
+printf 'iterm\\nHANDLE-GOING\\n%s\\n\\n' "$(cbm_plugin_root)" > "$f"
+cbm_alive_iterm() { return 1; }          # gone after the close
+cbm_close_recorded_pane "$f"; echo "rc=[$?]"
+[ -f "$f" ] && echo "record=kept" || echo "record=gone"
+''')
+        self.assertIn("rc=[0]", out, r.stderr)
+        self.assertIn("record=gone", out, r.stderr)
+
+    def test_a_session_is_never_declared_over_without_a_registry(self):
+        """Older Claude Code keeps no ~/.claude/sessions. Reading "no entry"
+        as "ended" there would retire every pane on the machine."""
+        out, r = self._sh('''
+cbm_session_is_live "whatever"; echo "rc=$?"
+''', home=self.tmp)
+        self.assertIn("rc=2", out, r.stderr)      # unknown, not ended
+
+    def test_a_session_missing_from_a_live_registry_has_ended(self):
+        out, r = self._sh(self.NEIGHBOUR + '''
+cbm_session_is_live "neighbour-session"; echo "live=$?"
+cbm_session_is_live "long-gone-session"; echo "gone=$?"
+''', home=self.tmp)
+        self.assertIn("live=0", out, r.stderr)
+        self.assertIn("gone=1", out, r.stderr)
+
+    def test_the_owning_session_is_read_from_the_process_tree(self):
+        """Which session is this? Asked of Claude Code, never inferred.
+
+        Slash commands run without $CLAUDE_SESSION_ID and the fallback picks the
+        newest transcript recorded against $PWD — which is a coin toss once two
+        sessions share a directory, and it came up wrong: the command closed a
+        neighbouring session's pane. Claude Code registers every live session
+        under its pid, so walk up to the claude that spawned us and read it.
+        """
+        out, r = self._sh('''
+mkdir -p "$HOME/.claude/sessions"
+printf '{"pid":%s,"sessionId":"mine-0000-0000"}' "$$" > "$HOME/.claude/sessions/$$.json"
+ps() { case "$*" in *comm*) echo claude ;; *) command ps "$@" ;; esac; }
+echo "sid=$(cbm_owner_sid)"
+echo "pid=$(cbm_owner_pid)/$$"
+''', home=self.tmp)
+        self.assertIn("sid=mine-0000-0000", out, r.stderr)
+
+    def test_a_pane_owned_by_another_live_session_is_never_closed(self):
+        """The invariant, independent of how the session id was arrived at.
+
+        Even handed the neighbour's own session id — precisely what a wrong
+        resolution looks like — the toggle must not touch their pane, delete
+        their state file, or open a monitor onto their session.
+        """
+        out, r = self._sh(self.NEIGHBOUR + '''
+printf 'iterm\\nHANDLE-THEIRS\\n%s\\n4242\\n' "$(cbm_plugin_root)" > "$f"
+cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+grep -q HANDLE-THEIRS "$f" && echo "theirs=kept" || echo "theirs=LOST"
+''', home=self.tmp)
+        self.assertIn("rc=5", out, r.stderr)          # left alone, said so
+        self.assertIn("theirs=kept", out, r.stderr)
+
+    def test_a_neighbours_pane_survives_the_stale_state_sweep(self):
+        """Panes are also forgotten by age. A live session's never is: losing
+        the handle leaves them a monitor they can no longer toggle off."""
+        out, r = self._sh(self.NEIGHBOUR + '''
+theirs="$(cbm_state_dir)/neighbour-session.pane"
+printf 'iterm\\nHANDLE-THEIRS\\n%s\\n4242\\n' "$(cbm_plugin_root)" > "$theirs"
+touch -t 200001010000 "$theirs"
+cbm_toggle_pane "$sid" "$trans" >/dev/null; echo "rc=$?"
+[ -f "$theirs" ] && echo "theirs=kept" || echo "theirs=SWEPT"
+''', home=self.tmp)
+        self.assertIn("theirs=kept", out, r.stderr)
+
+    def test_a_pane_whose_session_has_exited_is_still_reclaimed(self):
+        """The guard protects live neighbours, not abandoned panes — otherwise
+        every pane left by a session that has since quit would be untouchable."""
+        out, r = self._sh('''
+printf 'iterm\\nHANDLE-ORPHAN\\n%s\\n999999\\n' "$(cbm_plugin_root)" > "$f"
+cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+''', home=self.tmp)
+        self.assertIn("rc=3", out, r.stderr)          # ours to close
 
     def test_other_sessions_panes_are_left_alone(self):
         """Several Claude sessions run side by side; don't close their monitors."""
@@ -1129,6 +1237,22 @@ class TestTabs(Base):
                         "tab %s overflows at COLUMNS=%d: %r"
                         % (tab, cols, ansi.sub("", ln)))
 
+    def test_no_row_ends_in_dead_space(self):
+        """A dropped tail must take its separator with it.
+
+        Trailing padding is invisible until you select the pane to copy a
+        number out of it, and then every line has a ragged tail.
+        """
+        sid, path = self._session()
+        self.write_account(limits=[self.limit_row("session", "session", 12)])
+        for cols in (20, 28, 34, 60, 72):
+            for tab in self.TABS:
+                r = self._run(sid, path, tab, {"COLUMNS": str(cols),
+                                               "NO_COLOR": "1"})
+                for ln in r.stdout.splitlines():
+                    self.assertEqual(ln, ln.rstrip(),
+                                     "tab %s @%d: %r" % (tab, cols, ln))
+
     def test_no_color_across_tabs(self):
         sid, path = self._session()
         self.write_account(limits=[self.limit_row("session", "session", 12)])
@@ -1139,8 +1263,18 @@ class TestTabs(Base):
 
     def test_active_tab_is_marked_without_color(self):
         sid, path = self._session()
-        r = self._run(sid, path, "models", {"NO_COLOR": "1"})
-        self.assertIn("[models]", r.stdout)
+        r = self._run(sid, path, "models", {"NO_COLOR": "1", "COLUMNS": "60"})
+        self.assertIn("[3 models]", r.stdout)
+        self.assertIn("2 limits", r.stdout)          # inactive: no brackets
+        self.assertNotIn("[2 limits]", r.stdout)
+
+    def test_tab_numbers_are_visible(self):
+        """The 1-6 shortcut is only useful if the strip advertises it."""
+        sid, path = self._session()
+        r = self._run(sid, path, "live", {"NO_COLOR": "1", "COLUMNS": "60"})
+        strip = [ln for ln in r.stdout.splitlines() if "account" in ln][0]
+        for i, name in enumerate(self.TABS, start=1):
+            self.assertIn("%d %s" % (i, name), strip)
 
     def test_tabs_off_restores_the_static_panel(self):
         sid, path = self._session()
@@ -1196,6 +1330,34 @@ class TestTabs(Base):
         r = self._run(sid, path, "live", {"COLUMNS": "60"})
         self.assertIn("cache", r.stdout)
 
+    def test_a_clock_is_never_shown_without_saying_it_is_a_reset(self):
+        """The reported misread: `week ~21% Fable Wed 10:30`.
+
+        A scope name butted against a bare clock parses as one meaningless
+        blob. Wherever there is room, the reset time is a sentence.
+        """
+        sid, path = self._session()
+        self.write_account(limits=[
+            self.limit_row("session", "session", 12),
+            self.limit_row("weekly_scoped", "weekly", 21, scope="Fable")])
+        for tab in ("live", "limits"):
+            r = self._run(sid, path, tab, {"COLUMNS": "60", "NO_COLOR": "1"})
+            wk = [ln for ln in r.stdout.splitlines() if ln.startswith("week")]
+            self.assertTrue(wk, "no weekly row on %s" % tab)
+            self.assertIn("Fable · resets", wk[0], tab)
+
+    def test_headline_says_what_it_is_the_cost_of(self):
+        """A bare dollar figure got read as the 5h window and as the account."""
+        sid, path = self._session()
+        r = self._run(sid, path, "live", {"COLUMNS": "60", "NO_COLOR": "1"})
+        self.assertRegex(r.stdout, r"^session\s+\$")
+
+    def test_burn_numbers_are_labelled(self):
+        sid, path = self._session()
+        r = self._run(sid, path, "live", {"COLUMNS": "60", "NO_COLOR": "1"})
+        for want in ("BURN", "rate", "on track", "window"):
+            self.assertIn(want, r.stdout, want)
+
 
 def _cpu_seconds(pid):
     """CPU seconds a process has used, via `ps`. None if it can't be read."""
@@ -1212,6 +1374,53 @@ def _cpu_seconds(pid):
         return mins * 60 + float(ss)
     except ValueError:
         return None
+
+
+class TestPaneRetires(Base):
+    """A pane outliving its session, and refusing to outlive the check for one.
+
+    Closing the pane is the SessionEnd hook's job, but the hook runs while the
+    session tears down and can be cut short — which left a pane on screen after
+    the session that owned it was gone. The pane is the one thing still running
+    at that point, so it watches for its own session ending.
+    """
+
+    def _run(self, sessions=None, seconds=12):
+        home = os.path.join(self.tmp, "home")
+        proj = os.path.join(home, ".claude", "projects", "p")
+        os.makedirs(proj, exist_ok=True)
+        sid = "watched0-0000-0000-0000-000000000000"
+        path = os.path.join(proj, sid + ".jsonl")
+        write(path, [msg("claude-opus-5", "m1", out=1000)])
+        for pid, entry in (sessions or {}).items():
+            d = os.path.join(home, ".claude", "sessions")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "%s.json" % pid), "w") as fh:
+                json.dump(entry, fh)
+        e = dict(os.environ)
+        e.update({"HOME": home, "CBM_NO_NETWORK": "1", "CBM_RETIRE_CHECK": "1",
+                  "XDG_STATE_HOME": os.path.join(self.tmp, "state"),
+                  "XDG_CONFIG_HOME": os.path.join(self.tmp, "config")})
+        watch = os.path.abspath(os.path.join(HERE, "..", "bin", "watch.sh"))
+        try:
+            r = subprocess.run(["bash", watch, sid, path, "1", "manual"],
+                               capture_output=True, text=True, env=e,
+                               timeout=seconds)
+            return r.returncode
+        except subprocess.TimeoutExpired:
+            return None                       # still running
+
+    def test_the_pane_retires_when_its_session_has_ended(self):
+        """A registry that lists other sessions but not ours: we are over."""
+        rc = self._run(sessions={4242: {"pid": 4242,
+                                        "sessionId": "somebody-else"}})
+        self.assertEqual(rc, 0, "pane kept running after its session ended")
+
+    def test_the_pane_stays_when_there_is_no_registry_to_consult(self):
+        """No ~/.claude/sessions at all (older Claude Code) means unknown, and
+        unknown must never retire a pane the user is watching."""
+        self.assertIsNone(self._run(seconds=8),
+                          "retired a live pane on no evidence")
 
 
 class TestWatchKeys(unittest.TestCase):
@@ -1234,24 +1443,33 @@ class TestWatchKeys(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    # The pane's real size, set on the pty itself. $LINES/$COLUMNS deliberately
+    # disagree: a split pane inherits the WINDOW's size that way, and believing
+    # it is how the panel used to paint past the last row and scroll.
+    ROWS, COLS = 40, 60
+
     def _env(self):
         e = dict(os.environ)
-        e.update({"HOME": self.home, "COLUMNS": "60", "LINES": "40",
+        e.update({"HOME": self.home, "COLUMNS": "500", "LINES": "200",
                   "CBM_NO_NETWORK": "1", "TERM": "xterm-256color",
                   "XDG_STATE_HOME": os.path.join(self.tmp, "state"),
                   "XDG_CONFIG_HOME": os.path.join(self.tmp, "config")})
         return e
 
-    def _drive(self, keys, settle=1.2):
+    def _drive(self, keys, settle=1.2, env=None, script=None, mutate=None):
         """Run the watcher on a pty, send `keys`, return everything it drew."""
-        import pty, select, signal
+        import pty, select, signal, fcntl, termios, struct
         pid, fd = pty.fork()
         if pid == 0:                                   # child: the watcher
             os.environ.update(self._env())
+            os.environ.update(env or {})
             try:
-                os.execv("/bin/sh", ["sh", self.watch, self.sid, self.path, "1"])
+                os.execv("/bin/sh", ["sh", script or self.watch,
+                                     self.sid, self.path, "1"])
             finally:
                 os._exit(1)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ,
+                    struct.pack("HHHH", self.ROWS, self.COLS, 0, 0))
         buf = b""
 
         def pump(seconds):
@@ -1266,6 +1484,8 @@ class TestWatchKeys(unittest.TestCase):
                         return
         try:
             pump(settle)
+            if mutate:
+                mutate()
             for k in keys:
                 os.write(fd, k)
                 pump(0.8)
@@ -1305,6 +1525,159 @@ class TestWatchKeys(unittest.TestCase):
         out = self._drive([b"Z"])
         self.assertIn("MODELS", out)
         self.assertNotIn("RATE LIMITS", out)
+
+    def test_redraws_do_not_pile_up_in_scrollback(self):
+        """The ghost-frame report: scroll up, find the panel again, older.
+
+        Erasing the primary buffer scrolls the erased frame into scrollback, so
+        a redraw-in-place panel silently archives every frame it ever drew. The
+        fix is to own the alternate buffer, which has no scrollback at all --
+        and never to clear the primary one while we're on it.
+        """
+        out = self._drive([b"\033[C", b"\033[C"])
+        self.assertIn("\033[?1049h", out, "never entered the alternate buffer")
+        self.assertIn("MODELS", out)
+        # ED2 on the primary buffer is precisely what banks the ghost frame.
+        body = out.split("\033[?1049h", 1)[1]
+        self.assertNotIn("\033[2J", body, "cleared the primary buffer while on alt")
+
+    def test_nothing_the_watcher_draws_can_reach_the_scrollback(self):
+        """The ghost frame, and the two wrong theories it survived.
+
+        A terminal banks a line into scrollback when the line leaves the
+        screen: on a scroll, or when an app hands over a frame to erase. The
+        first fix moved the panel to the alternate buffer, assuming that buffer
+        had no scrollback -- iTerm2 saves it by default, so an erase-down there
+        banked a copy per redraw, worse than the `clear` it replaced. The
+        second fix stopped erasing but still ended each row with a newline, one
+        scroll away from the same bug if the height was ever misjudged.
+
+        So this asserts the property rather than any one mechanism: over a run
+        with redraws and tab switches, nothing the watcher emits can push a
+        line off the screen. No erase wider than a single row, no newline at
+        all, and -- replayed through a cursor model at the pty's real size --
+        no write below the last row and no wrap past the last column.
+        """
+        out = self._drive([b"\033[C", b"3", b"\033[D"])
+        after = out.split("\033[?1049h", 1)[1]
+        frames = len(re.findall(r"\033\[1;1H", after))
+        self.assertGreaterEqual(frames, 2, "expected a redraw")
+        self.assertIn("\033[K", after, "not painting in place")
+        self.assertEqual(after.count("\n"), 0, "a newline can scroll the screen")
+        for seq, what in ((r"\033\[[0123]?J", "erased the screen"),
+                          (r"\033\[[0-9;]*S", "scrolled the screen up")):
+            self.assertIsNone(re.search(seq, after), what)
+
+        row, col, wrap, lowest, wrapped = 1, 1, True, 1, 0
+        i = 0
+        while i < len(after):
+            m = re.match(r"\033\[(\d*);?(\d*)([Hf])|\033\[\?7([lh])"
+                         r"|\033\[[0-9;?]*[A-Za-z]", after[i:])
+            if m:
+                if m.group(3):
+                    row, col = int(m.group(1) or 1), int(m.group(2) or 1)
+                elif m.group(4):
+                    wrap = m.group(4) == "h"
+                i += m.end()
+            else:
+                if after[i] == "\r":
+                    col = 1
+                else:
+                    col += 1
+                    if col > self.COLS and wrap:
+                        wrapped, col, row = wrapped + 1, 1, row + 1
+                i += 1
+            lowest = max(lowest, row)
+        self.assertEqual(wrapped, 0, "a row wrapped, pushing the last one off")
+        self.assertLessEqual(lowest, self.ROWS, "wrote below the last row")
+
+    def test_the_panel_measures_the_pane_not_the_window(self):
+        """$LINES/$COLUMNS describe the window a split pane was carved out of.
+
+        The env in this harness claims 200x500 against a 40x60 pty on purpose.
+        Believing it paints 200 rows into a 40-row pane, which scrolls -- the
+        ghost again, by the back door. Every consumer must ask the tty, so the
+        watcher drops both variables outright.
+        """
+        out = self._drive([b"\033[C"])
+        after = out.split("\033[?1049h", 1)[1]
+        addressed = [int(n) for n in re.findall(r"\033\[(\d+);1H", after)]
+        self.assertTrue(addressed, "panel is not addressing rows absolutely")
+        self.assertLessEqual(max(addressed), self.ROWS,
+                             "addressed a row the pane does not have")
+        self.assertGreaterEqual(max(addressed), self.ROWS - 2,
+                                "painted only part of the pane")
+
+    def test_a_patched_watcher_reaches_a_pane_that_is_already_running(self):
+        """bash reads this script from an open fd by offset as it runs.
+
+        So a pane that has been open for days keeps executing the build it
+        started with, whatever is on disk -- which is why two earlier fixes for
+        the ghost frame looked like they had failed when they had not. The
+        watcher notices its own file changing and re-execs into it.
+        """
+        script = self._script_copy()
+
+        # Renamed into place, which is how an install lands and the only safe
+        # way: rewriting the file underneath a running bash makes it read the
+        # new bytes from its old offset, and it dies on the spot.
+        out = self._drive([b"\033[C"], script=script,
+                          mutate=lambda: self._swap(script, "printf RESPAWNED\n"
+                                                            "sleep 5\n"))
+        self.assertIn("RESPAWNED", out, "kept running the replaced script")
+
+    def test_a_half_written_watcher_is_never_exec_into(self):
+        """An update is not atomic from here; catching the file mid-write and
+        exec'ing it would close the pane. Syntax-check before trusting it."""
+        script = self._script_copy()
+        out = self._drive([b"\033[C"], script=script,
+                          mutate=lambda: self._swap(script, "while true; do\n"))
+        self.assertNotIn("syntax error", out.lower())
+        self.assertIn("\033[K", out, "stopped painting instead of carrying on")
+
+    def _swap(self, path, body):
+        """Replace `path` by rename, the way an install or an upgrade does."""
+        tmp = path + ".new"
+        with open(tmp, "w") as f:
+            f.write("#!/usr/bin/env bash\n" + body)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)
+
+    def _script_copy(self):
+        """A writable watch.sh laid out the way the plugin is: the script
+        resolves lib/ relative to its own directory, so a bare copy in a temp
+        dir exits at the first `.` instead of running."""
+        root = os.path.join(self.tmp, "plugin")
+        os.makedirs(os.path.join(root, "bin"), exist_ok=True)
+        lib = os.path.join(root, "lib")
+        if not os.path.exists(lib):
+            os.symlink(os.path.abspath(os.path.join(HERE, "..", "lib")), lib)
+        script = os.path.join(root, "bin", "watch.sh")
+        shutil.copy(self.watch, script)
+        return script
+
+    def test_dropping_to_a_shell_hands_the_screen_back(self):
+        """Leaving the panel must restore the buffer and the cursor, or the
+        shell it execs into inherits an invisible cursor on a screen the user
+        cannot scroll."""
+        out = self._drive([b"q"], env={"SHELL": "/bin/sh"})
+        self.assertIn("\033[?1049l", out)
+        self.assertIn("\033[?25h", out)
+
+    def test_altscreen_opt_out_still_clears_scrollback(self):
+        """Terminals without the alternate buffer must not ghost either.
+
+        Order is the whole fix. `clear(1)` emits ESC[3J ESC[H ESC[2J -- it drops
+        the scrollback and *then* banks the frame it just erased, which is how
+        exactly one ghost copy survives every redraw. The scrollback wipe has to
+        come last.
+        """
+        out = self._drive([b"\033[C"], env={"CBM_ALTSCREEN": "0"})
+        self.assertNotIn("\033[?1049h", out)
+        self.assertIn("\033[3J", out, "left the ghost frame in scrollback")
+        self.assertGreater(out.rfind("\033[3J"), out.rfind("\033[2J"),
+                           "erased the screen after dropping scrollback, "
+                           "which re-banks the frame it just erased")
 
     def test_no_tty_does_not_spin(self):
         """Without a terminal, `read` fails instantly -- if that became the

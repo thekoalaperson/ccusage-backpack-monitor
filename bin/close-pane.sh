@@ -19,10 +19,10 @@ state="$(cbm_state_dir)"
 f="$state/$sid.pane"
 [ -f "$f" ] || exit 0
 
-backend="$(cbm_state_backend "$f")"   # 'iterm' for legacy single-line files
-handle="$(cbm_state_handle "$f")"
-rm -f "$f"
-[ -z "$handle" ] && exit 0
-
-cbm_pane_close "$handle" "$backend"
+# Close first, unlink only once the pane is actually gone. A SessionEnd hook is
+# not a guarantee — it runs while the session is tearing down and can be cut
+# short — and forgetting the pane before closing it turns any such failure into
+# a pane nothing can ever find again. Keeping the record means the next toggle,
+# the next session's sweep, or the watcher itself can still finish the job.
+cbm_close_recorded_pane "$f"
 exit 0

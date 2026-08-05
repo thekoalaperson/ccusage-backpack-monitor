@@ -4,6 +4,113 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-08-05
+
+### Fixed
+- **A pane could outlive the session it was watching.** Closing the pane is the
+  `SessionEnd` hook's job, but a hook is not a guarantee — it runs while the
+  session is tearing down and can be cut short. When that happened the pane
+  stayed on screen after the session ended, and worse: the hook unlinked the
+  pane's state file *before* closing it, so a failed close left a pane that
+  nothing could ever find again. No toggle, no sweep and no later hook can
+  reach a pane with no record, and the only way out was closing it by hand.
+
+  The state file now outlives a failed close — the pane is closed, verified,
+  retried once, and only forgotten once it is really gone — so a failure
+  becomes a retry rather than an orphan.
+
+  And the pane no longer depends on the hook at all. It is the one thing still
+  running when a session ends, so it checks: if Claude Code's live-session
+  registry no longer lists the session it follows, it sees itself out. Three
+  consecutive misses are required, and a machine with no registry (older Claude
+  Code) yields *unknown* rather than *ended*, so a pane is never retired on an
+  absence of evidence. Costs one `grep` a minute.
+
+- **`/ccusage-monitor` could close another session's pane.** The slash command
+  runs without `$CLAUDE_SESSION_ID`, so it worked out which session it belonged
+  to by taking the most recently written transcript recorded against `$PWD`.
+  With two Claude sessions running in the same directory that is a coin toss,
+  and losing it meant resolving to the *neighbouring* session — then toggling
+  its monitor pane shut, in a window the user was not even looking at.
+
+  The session id is no longer inferred. Claude Code registers every live session
+  as `~/.claude/sessions/<pid>.json`, so the command walks up its own process
+  ancestry to the `claude` that spawned it and reads the id straight out. Exact,
+  and indifferent to how many sessions share a directory.
+
+  Because a wrong answer here is so costly, the guarantee no longer depends on
+  getting it right: pane state files now record the pid of the session that
+  opened them, and **a pane owned by a different live Claude session is never
+  closed, never reopened, never swept by the stale-state prune, and never has
+  its state file deleted** — whatever session id was resolved. Where that would
+  once have closed a pane, the command now leaves it alone and says so. Panes
+  whose owning session has exited are still reclaimed, so nothing is stranded.
+- **The ghost panel in scrollback.** Scrolling up in the monitor pane found the
+  panel again, showing older numbers. A terminal banks a line into scrollback
+  when that line leaves the screen — on a scroll, or when an application hands
+  over a whole frame to erase — and a panel that redraws on every change was
+  doing the latter every few seconds. macOS `clear(1)` makes it exact: it emits
+  `ESC[3J ESC[H ESC[2J`, dropping the scrollback and *then* banking the frame it
+  just erased, which is why precisely one ghost survived each redraw.
+
+  The panel therefore **erases nothing**. Each row is addressed absolutely,
+  overwritten, and erased only to its own end; rows below the panel are blanked
+  the same way, autowrap is off for the duration, and no newline is emitted at
+  all. The cursor is never advanced off a row, so the screen cannot scroll and
+  no line can leave it — on any terminal, in either screen buffer.
+
+  Two things had to be true for this to keep holding, and neither was:
+
+  - `$LINES`/`$COLUMNS` are now ignored outright. A pane inherits them from the
+    window it was split out of, so they describe a *larger* screen than the pane
+    owns — and everything downstream believes them, `tput` and Python's
+    `shutil.get_terminal_size()` included. Painting a pane to its window's
+    height is a scroll. The size comes from the tty itself now, and resizes
+    with it.
+  - The watcher **re-execs itself when its own file changes**. `bash` reads a
+    script from an open descriptor by offset as it runs, so a pane open for days
+    keeps executing the build it started with no matter what is installed. Two
+    earlier attempts at this bug looked like failures for exactly that reason.
+    The successor is syntax-checked before being `exec`'d, so an update caught
+    mid-write can never close the pane.
+
+  The panel also runs on the **alternate screen buffer** — the one `vim`, `less`
+  and `htop` use — so the pane's previous contents come back when it exits. That
+  is now presentation, not the fix: iTerm2 saves alternate-screen lines to
+  scrollback by default, so an erase there banked a copy per redraw with nothing
+  to drop the pile. Every exit path hands the screen back, including `q` and
+  `Ctrl-C`, which `exec` a shell rather than returning. `CBM_ALTSCREEN=0` opts
+  out of the buffer; that path clears scrollback *after* erasing.
+
+### Changed
+- **Every number now says what it is.** The panel had accumulated bare figures
+  whose meaning you had to remember: a headline dollar amount with no stated
+  scope, `~$121` beside `ends 15:30`, and a weekly limit rendered `Fable Wed
+  10:30` — a scope name butted against a clock, with nothing marking it as a
+  reset. Reset times are sentences now (`Fable · resets Wed 10:30 · 21h left`),
+  the headline reads `session $25.36`, and the burn block is four labelled rows
+  (`rate` / `so far` / `on track` / `window`).
+
+  Phrasings are *reworded* to fit rather than truncated: a heading clipped
+  mid-word ("5h rolling block · all sessi") is worse than no note at all, and
+  below ~40 columns the meter gives up cells so the sentence beside it survives.
+
+- **Tabs advertise their own shortcut.** The strip is numbered (`1 live
+  2 limits …`), so the `1`–`6` jump keys are discoverable instead of being
+  documented only under `?`. The footer names the keys it expects.
+
+- **Each tab reworked around aligned key/value rows and comparable bars.**
+  `models` lays its token counts out as labelled cells sized to their contents
+  rather than to half the pane; `agents` gives every agent a share bar and ends
+  with the you-vs-agents split; `trend` draws a real bar per day with `today`
+  and `yest` named, and separates the lifetime totals under their own `ALL TIME`
+  heading — they sat under `7 DAYS` reading as the week's; `limits` states in
+  plain words that the percentages are account-wide and that they, not the
+  dollars, are what stop you; `account` labels every field.
+
+- `?` explains the `~` marker, which appears on any figure the panel will not
+  vouch for as current or exact.
+
 ## [0.10.0] - 2026-08-04
 
 ### Added

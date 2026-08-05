@@ -80,7 +80,27 @@ def _tab_index(arg):
 
 TAB = _tab_index(sys.argv[3] if len(sys.argv) > 3 else "") if SHOW_TABS else 0
 
-W = shutil.get_terminal_size((48, 24)).columns
+def term_size():
+    """This pane's size, asked of the terminal itself.
+
+    Deliberately not shutil.get_terminal_size(), which prefers $COLUMNS/$LINES.
+    A pane inherits those from whatever opened it, and in a split they describe
+    the *window*: believing them makes the panel paint more rows than the pane
+    has, which scrolls -- and a scrolled line is exactly what ends up haunting
+    the scrollback. The ioctl answers for this tty and resizes with it.
+    """
+    for f in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            sz = os.get_terminal_size(f.fileno())
+            if sz.columns > 0 and sz.lines > 0:
+                return sz.lines, sz.columns
+        except Exception:
+            pass
+    sz = shutil.get_terminal_size((48, 24))     # not a tty: piped, or a test
+    return max(2, sz.lines), sz.columns
+
+
+ROWS, W = term_size()
 # Clamp only the UPPER bound. A lower floor would make the panel render wider
 # than the pane and wrap, which is the bug this replaced.
 W = max(8, min(W, 72))
@@ -163,6 +183,20 @@ def fit(parts):
             if not chosen[i][1]:
                 chosen.pop(i)
                 break
+
+
+def pick(width, *cands):
+    """The first candidate that fits `width` columns, longest phrasing first.
+
+    `fit` drops fields; this rewords one. A reset time can be "Fable · resets
+    Wed 10:30 · 2d left" or "Wed 10:30" depending on the room available, and
+    dropping the words would leave a bare clock with nothing saying what it is
+    — which is exactly the reading this panel got wrong before.
+    """
+    for c in cands:
+        if c and dw(c) <= width:
+            return c
+    return ""
 
 
 def human(n):
@@ -259,19 +293,74 @@ def context_color(frac):
     return RED
 
 
-def meter_row(label, frac, pct_text, detail, col, out):
-    """One aligned gauge row: label, bar, percent, then an optional detail.
+def meter_row(label, frac, pct_text, details, col, out, indent=""):
+    """One aligned gauge row: label, bar, percent, then a fitted detail.
 
     All three limits share this shape on purpose -- ctx, the 5h window and the
     weekly cap are the same question ("how full, and when does it reset"), so
     they should be one vertical scan rather than three different-looking rows.
+
+    `details` is a list of phrasings for the tail, longest first.
     """
-    mw = 6 if TIGHT else (8 if NARROW else 10)
+    # Below ~40 columns the bar is decoration and the sentence beside it is
+    # not: a bare "Wed 10:30" with no "resets" is the exact misreading this
+    # panel is being fixed for, so the meter yields the columns first.
+    mw = 6 if W < 40 else (8 if NARROW else 10)
+    spent = len(indent) + 4 + 1 + mw + 5 + 2
+    detail = pick(max(0, W - spent), *details) if details else ""
+    parts = [("%s%s%-4s%s " % (indent, BOLD, label[:4], RESET), True),
+             ("%s%s%s" % (col, meter(frac, mw), RESET), True),
+             ("%s%5s%s" % (col, pct_text, RESET), True)]
+    if detail:                       # no empty tail, no trailing whitespace
+        parts.append(("  %s%s%s" % (GREY, detail, RESET), False))
+    out.append(line(fit(parts)))
+
+
+def kv(key, val, out, col=None, kw=None, indent="  "):
+    """A labelled value: dim key in a fixed column, bright value beside it.
+
+    Every bare number on this panel used to require remembering what it was.
+    Aligning the labels costs a few columns and removes that entirely.
+    """
+    # Never below 7: the keys here ("credits", "sessions") are words, and a
+    # column that renders "credi" costs more clarity than it saves space.
+    kw = kw if kw is not None else 7
     out.append(line(fit([
-        ("%s%-4s%s " % (BOLD, label, RESET), True),
-        ("%s%s%s" % (col, meter(frac, mw), RESET), True),
-        ("%s%5s%s" % (col, pct_text, RESET), True),
-        ("  %s%s%s" % (GREY, detail, RESET), False)])))
+        ("%s%s%-*s%s " % (indent, GREY, kw, key[:kw], RESET), True),
+        ("%s%s%s" % (col or WHITE, val, RESET), True)])))
+
+
+def cells(pairs, out, indent="  "):
+    """Small key/value cells, two per row when there's room, else one.
+
+    The cell is sized to its contents, not to half the pane: splitting the
+    width evenly pushes each value miles from its own label and turns a
+    four-number block into something you have to trace with a finger.
+    """
+    kw = 12 if not NARROW else 11
+    cw = kw + 10
+    per = 2 if W >= len(indent) + 2 * cw else 1
+    for i in range(0, len(pairs), per):
+        s = indent
+        for k, v in pairs[i:i + per]:
+            cell = "%s%-*s%s%s%s" % (GREY, kw, k[:kw], WHITE, v, RESET)
+            s += cell + " " * max(0, cw - dw(cell))
+        out.append(line(s.rstrip()))
+
+
+def bar_row(label, frac, value, tail, col, out, indent="  ", lw=6):
+    """label · bar · value · optional tail, degrading bar-then-tail.
+
+    Used wherever a share is being compared (models, agents, daily history), so
+    the same shape means the same thing everywhere on the panel.
+    """
+    bw = max(6, min(20, W - (len(indent) + lw + 12)))
+    parts = [("%s%s%-*s%s " % (indent, WHITE, lw, label[:lw], RESET), True),
+             ("%s%s%s " % (col, meter(frac, bw), RESET), False),
+             ("%s%7s%s" % (GREEN if "$" in str(value) else WHITE, value, RESET), True)]
+    if tail:
+        parts.append(("  %s%s%s" % (GREY, tail, RESET), False))
+    out.append(line(fit(parts)))
 
 
 def locate(sid, transcript):
@@ -330,6 +419,31 @@ estimated = [n for n, _ in models if not pricing.is_exact(n)]
 out = []
 
 
+def limit_phrasings(row, now, scope_as="", extra=0):
+    """How to say "21%, resets Wed 10:30, scoped to Fable" at any width.
+
+    The old panel emitted "Fable Wed 10:30", which reads as one unidentifiable
+    blob: no verb, no separator, and nothing saying the clock is a reset. Every
+    phrasing here keeps the word `resets` for as long as the room lasts.
+    """
+    scope = scope_as or (row.get("scope") or "")
+    at = when(row.get("resets"), now)
+    left = (row.get("resets") or 0) - now
+    left_s = dur(left) if (row.get("resets") and left > 0) else ""
+    base = "resets %s" % at if at else ""
+    long = base + (" · %s left" % left_s if base and left_s else "")
+    plus = " · +%d more" % extra if extra > 0 else ""
+    cands = []
+    if scope and base:
+        cands += [scope + " · " + long + plus, scope + " · " + long,
+                  scope + " · " + base]
+    elif scope:
+        cands += [scope]
+    if base:
+        cands += [long + plus, long, base, at]
+    return [c for c in cands if c] or [scope or ""]
+
+
 # ---- pinned header --------------------------------------------------------
 def draw_header():
     if agent_of:
@@ -337,18 +451,24 @@ def draw_header():
             ("%sagent %s" % (YELLOW, own.get("agent") or "?"), True),
             ("%s of session %s%s" % (GREY, agent_of, RESET), False),
             ("%s" % RESET, True)])))
-    out.append(line(fit([
-        ("%s%s%s%s" % (BOLD, GREEN, money(tot_cost), RESET), True),
-        ("  %s%s%s" % (BOLD, human(tot_tok), RESET), False),
-        ("%s tok%s" % (BOLD, RESET), False),
-        (" %s· %d turns%s" % (GREY, turns, RESET), False)])))
+    # `session` is the most important word on the panel: without it the top
+    # line is a dollar figure with no stated scope, and readers assumed it was
+    # the 5h window or the whole account.
+    head = [("%ssession%s " % (GREY, RESET), True),
+            ("%s%s%s%s" % (BOLD, GREEN, money(tot_cost), RESET), True),
+            ("  %s%s tok%s" % (WHITE, human(tot_tok), RESET), False),
+            ("  %s%d turns%s" % (GREY, turns, RESET), False)]
+    if sess.get("started"):
+        head.append(("  %sup %s%s" % (GREY, dur(time.time() - sess["started"]),
+                                      RESET), False))
+    out.append(line(fit(head)))
     if sess["agents"]:
         n = len(sess["agents"])
         noun = "ag" if TIGHT else ("agent" if n == 1 else "agents")
         out.append(line(fit([
-            ("%s  you %s" % (GREY, money(sess["self_cost"])), True),
-            (" · %d %s %s" % (n, noun, money(sess["agent_cost"])), False),
-            ("%s" % RESET, True)])))
+            ("%s  you %s%s%s" % (GREY, GREEN, money(sess["self_cost"]), RESET), True),
+            ("  %s%d %s %s%s%s" % (GREY, n, noun, GREEN,
+                                   money(sess["agent_cost"]), RESET), False)])))
 
     rows = 0
     # ctx first: of the three, it's the one that fills in minutes.
@@ -366,7 +486,9 @@ def draw_header():
         if known:
             frac = (ctok / float(cwin)) if cwin else 0.0
             meter_row("ctx", frac, "%d%%" % round(frac * 100),
-                      "%s/%s" % (human(ctok), human(cwin)),
+                      ["%s of %s window" % (human(ctok), human(cwin)),
+                       "%s of %s" % (human(ctok), human(cwin)),
+                       "%s/%s" % (human(ctok), human(cwin))],
                       context_color(frac), out)
         else:
             out.append(line(fit([
@@ -378,6 +500,8 @@ def draw_header():
         # A stale cache is marked with the same `~` the panel already uses for
         # an estimated rate: a number we are not willing to vouch for as current.
         mark = "~" if LIM_STALE else ""
+        now = time.time()
+        extra = len(limits.get("weekly") or []) - 1
         for label, row in (("5h", limits.get("session")),
                            ("week", (limits.get("weekly") or [None])[0])):
             if not row:
@@ -386,14 +510,10 @@ def draw_header():
                 out.append(line())
             rows += 1
             pct = row["percent"]
-            detail = when(row["resets"])
-            if row.get("scope") and not TIGHT:
-                detail = "%s %s" % (row["scope"], detail) if detail else row["scope"]
-            extra = len(limits.get("weekly") or []) - 1
-            if label == "week" and extra > 0 and not NARROW:
-                detail += "  +%d" % extra
             meter_row(label, pct / 100.0, "%s%d%%" % (mark, round(pct)),
-                      detail, level_color(acct.severity_rank(row)), out)
+                      limit_phrasings(row, now,
+                                      extra=extra if label == "week" else 0),
+                      level_color(acct.severity_rank(row)), out)
     return rows
 
 
@@ -402,15 +522,19 @@ def draw_tabs():
     if not SHOW_TABS:
         return
     out.append(line())
-    for idx in (1, 2):              # full labels, then short ones
+    # Numbered, because `1`-`6` is the fastest way to move and nothing else on
+    # screen advertises it. The number and the name are one unit, so the active
+    # highlight covers both.
+    for idx, sep in ((1, "  "), (1, " "), (2, " ")):
         seg = []
         for i, t in enumerate(TABS):
-            name = t[idx]
+            name = "%d %s" % (i + 1, t[idx])
             if i == TAB:
-                seg.append("[%s]" % name if NO_COLOR else "%s%s%s" % (REV, name, RESET))
+                seg.append("[%s]" % name if NO_COLOR
+                           else "%s %s %s" % (REV, name, RESET))
             else:
                 seg.append("%s%s%s" % (GREY, name, RESET))
-        s = " ".join(seg)
+        s = sep.join(seg)
         if dw(s) <= W:
             out.append(line(s))
             return
@@ -420,32 +544,32 @@ def draw_tabs():
 
 
 # ---- tab bodies -----------------------------------------------------------
-def sect(title, note=""):
+def sect(title, *notes):
+    """Section heading, with a note that is reworded rather than truncated.
+
+    A heading clipped mid-word ("5h rolling block · all sessi") is worse than
+    no note at all, so the shortest candidate is always the empty string.
+    """
     out.append(line())
     s = "%s%s%s" % (BOLD, title, RESET)
-    if note and not TIGHT:
+    note = pick(max(0, W - dw(title) - 2), *(list(notes) + [""])) if notes else ""
+    if note:
         s += "  %s%s%s" % (GREY, note, RESET)
     out.append(line(s))
 
 
 def draw_models_brief():
-    sect("MODELS")
+    sect("MODELS", "share of session spend", "share of spend", "by spend")
     if not models:
         out.append(line("  %sno priced usage yet%s" % (GREY, RESET)))
-    # Leave room for the bullet, cost, and padding; clamp so names stay readable.
-    namew = max(6, min(11, W - 13))
     for n, m in models[:6]:
         name = short_model(n)
-        col = model_color(name)
         mtok = m["input"] + m["output"] + m["cache_read"] + m["cache_creation"]
         share = (m["cost"] / tot_cost) if tot_cost else 0
-        mark = "~" if not pricing.is_exact(n) else " "
-        out.append(line(fit([
-            ("  %s●%s " % (col, RESET), True),
-            ("%s%-*s%s" % (col, namew, name[:namew], RESET), True),
-            (" %s%s%s%s%s" % (GREY, mark, GREEN, money(m["cost"]), RESET), True),
-            (" %s%s%s" % (col, meter(share, 8), RESET), False),
-            (" %s%5s%s" % (WHITE, human(mtok), RESET), False)])))
+        mark = "~" if not pricing.is_exact(n) else ""
+        bar_row(name, share, mark + money(m["cost"]),
+                "%s tok" % human(mtok), model_color(name), out,
+                lw=max(6, min(12, W - 24)))
     # Cache hit rate is the single biggest lever on what a session costs, and
     # it's already summed -- so it rides along on a line that exists anyway.
     reads = sum(m["cache_read"] for _n, m in models)
@@ -454,26 +578,26 @@ def draw_models_brief():
         hit = 100.0 * reads / (reads + fresh)
         per = (tot_cost / turns) if turns else 0.0
         out.append(line(fit([
-            ("    %scache %d%%%s" % (GREY, round(hit), RESET), True),
-            (" %s· %s/turn%s" % (GREY, money(per), RESET), False)])))
+            ("  %scache hits %s%d%%%s" % (GREY, GREEN, round(hit), RESET), True),
+            (" %s· %s per turn%s" % (GREY, money(per), RESET), False)])))
 
 
 def draw_agents_brief():
     if not (SHOW_AGENTS and sess["agents"]):
         return
     top = sess["agents"][:3]
-    note = ""
-    if len(sess["agents"]) > len(top):
-        note = "(top %d of %d)" % (len(top), len(sess["agents"]))
-    sect("AGENTS", note)
-    aw = 10 if TIGHT else 16
+    share = (100.0 * sess["agent_cost"] / tot_cost) if tot_cost else 0.0
+    note = ("top %d of %d · %d%% of spend"
+            % (len(top), len(sess["agents"]), round(share))
+            if len(sess["agents"]) > len(top)
+            else "%d · %d%% of spend" % (len(top), round(share)))
+    sect("AGENTS", note, "%d%% of spend" % round(share))
     for ag in top:
         named = [x for x in ag["models"] if pricing.is_priceable(x)]
         mods = "+".join(short_model(x).split("-")[0] for x in named[:2])
-        out.append(line(fit([
-            ("  %s%-*s%s" % (WHITE, aw, ag["name"][:aw], RESET), True),
-            (" %s%7s%s" % (GREEN, money(ag["cost"]), RESET), True),
-            (" %s%s%s" % (GREY, mods[:14], RESET), False)])))
+        share = (ag["cost"] / tot_cost) if tot_cost else 0
+        bar_row(ag["name"], share, money(ag["cost"]), mods[:12], CYAN, out,
+                lw=max(6, min(12, W - 24)))
 
 
 def draw_burn():
@@ -486,17 +610,25 @@ def draw_burn():
     if not blk:
         return
     col = burn_color(blk["rate"])
-    flame = "" if NARROW else "🔥 "
-    out.append(line())
-    parts = []
-    # When the server's own 5h percentage is on screen the local dollar total
-    # for that window is redundant; without it, it's the only 5h figure there is.
-    if not (limits and limits.get("session")):
-        parts.append(("%s5h%s %s%s%s  " % (BOLD, RESET, YELLOW, money(blk["cost"]), RESET), True))
-    parts += [("%s%s$%.1f/hr%s" % (col, flame, blk["rate"], RESET), True),
-              ("  %s~%s%s" % (WHITE, money(blk["projected"]), RESET), False),
-              ("  %sends %s%s" % (GREY, hm(blk["end"]), RESET), False)]
-    out.append(line(fit(parts)))
+    # Previously "$24.2/hr  ~$121  ends 15:30": a rate, an unexplained dollar
+    # figure and an unexplained clock. Each number now says what it is.
+    sect("BURN", "5h rolling block · all sessions", "5h rolling block",
+         "5h block")
+    kw = 8 if not TIGHT else 5
+    keys = ("rate", "so far", "on track", "window") if not TIGHT \
+        else ("rate", "spent", "eta", "ends")
+    kv(keys[0], "%s$%.1f/hr" % ("" if NARROW else "🔥 ", blk["rate"]),
+       out, col=col, kw=kw)
+    kv(keys[1], money(blk["cost"]), out, col=GREEN, kw=kw)
+    kv(keys[2], pick(max(0, W - kw - 4),
+                     "~%s by end of block" % money(blk["projected"]),
+                     "~%s this block" % money(blk["projected"]),
+                     "~%s" % money(blk["projected"])), out, col=YELLOW, kw=kw)
+    left = blk["end"] - time.time()
+    kv(keys[3], pick(max(0, W - kw - 4),
+                     "ends %s · %s left" % (hm(blk["end"]), dur(left)),
+                     "ends %s" % hm(blk["end"]),
+                     hm(blk["end"])), out, kw=kw)
 
 
 def draw_graph():
@@ -504,11 +636,16 @@ def draw_graph():
         return
     width = max(8, W - 2)
     outs = sess["outputs"]
-    out.append(line())
-    out.append(line(fit([
-        ("%sout/turn%s" % (BOLD, RESET), True),
-        (" %s(last %d)%s" % (GREY, min(len(outs), width), RESET), False)])))
+    shown = outs[-width:]
+    sect("ACTIVITY", "output tokens per turn", "output per turn", "out/turn")
     out.append(line("%s%s%s" % (BLUE, spark(outs, width), RESET)))
+    # A sparkline with no scale is decoration. Three numbers make it a chart.
+    if shown and not TIGHT:
+        avg = sum(shown) / float(len(shown))
+        out.append(line(fit([
+            ("  %slast %d turns%s" % (GREY, len(shown), RESET), True),
+            ("  %speak %s%s" % (GREY, human(max(shown)), RESET), False),
+            ("  %savg %s%s" % (GREY, human(avg), RESET), False)])))
 
 
 def draw_footer_id():
@@ -543,9 +680,11 @@ def draw_footer_id():
 
 
 def tab_live():
+    # Rate before totals: the header already carries the totals, so what this
+    # tab adds is the direction things are moving in.
+    draw_burn()
     draw_models_brief()
     draw_agents_brief()
-    draw_burn()
     draw_graph()
     if estimated:
         out.append(line())
@@ -566,48 +705,57 @@ def tab_limits():
     age = "as of %s ago" % dur(LIM_AGE) if LIM_AGE is not None else "age unknown"
     sect("RATE LIMITS", age)
     now = time.time()
-    rows = [("session", limits.get("session"))]
-    rows += [("weekly", r) for r in (limits.get("weekly") or [])]
+    rows = [("5h", limits.get("session"), "")]
+    # An unscoped weekly covers everything, which is worth saying out loud when
+    # a scoped one sits right beside it claiming a different number.
+    rows += [("week", r, r.get("scope") or "all models")
+             for r in (limits.get("weekly") or [])]
     drew = False
-    for label, row in rows:
+    for label, row, scope in rows:
         if not row:
             continue
         drew = True
-        col = level_color(acct.severity_rank(row))
-        name = label if not row.get("scope") else "%s %s" % (label[:4], row["scope"])
-        out.append(line(fit([
-            ("  %s%-*s%s" % (BOLD, max(7, min(14, W - 12)),
-                             name[:max(7, min(14, W - 12))], RESET), True),
-            ("%s%4d%%%s" % (col, round(row["percent"]), RESET), True)])))
-        if row.get("resets"):
-            left = row["resets"] - now
-            txt = "resets %s" % when(row["resets"], now)
-            if left > 0:
-                txt += "  in %s" % dur(left)
-            out.append(line("    %s%s%s" % (GREY, clip(txt, max(0, W - 4)), RESET)))
+        meter_row(label, row["percent"] / 100.0, "%d%%" % round(row["percent"]),
+                  limit_phrasings(row, now, scope_as=scope),
+                  level_color(acct.severity_rank(row)), out)
     if not drew:
         out.append(line("  %sno active limits reported%s" % (GREY, RESET)))
 
-    cred = limits.get("credits")
     out.append(line())
+    cred = limits.get("credits")
     if cred:
         col = RED if cred.get("capped") else YELLOW
-        out.append(line(fit([
-            ("  %scredits%s " % (BOLD, RESET), True),
-            ("%s%d%%%s" % (col, round(cred["percent"] or 0), RESET), True),
-            (" %s%s used%s" % (GREY, money(cred["used"]), RESET), False)])))
+        kv("credits", "%d%% · %s used" % (round(cred["percent"] or 0),
+                                          money(cred["used"])), out, col=col)
     else:
-        out.append(line("  %scredits  off%s" % (GREY, RESET)))
+        kv("credits", "off", out, col=GREY)
     if ident and ident.get("plan"):
-        out.append(line("  %splan     %s%s%s" % (GREY, YELLOW, ident["plan"], RESET)))
+        kv("plan", ident["plan"], out, col=YELLOW)
+
     out.append(line())
-    out.append(line("%saccount-wide, all machines%s" % (GREY, RESET)))
+    # The panel's own dollar figures are computed from token counts, which is
+    # not what a subscription actually meters. Saying so here is the difference
+    # between "$25 spent" reading as a bill and reading as a workload estimate.
+    for txt in (pick(W, "Account-wide: every machine, every session.",
+                     "Account-wide: every machine,",
+                     "account-wide"),
+                pick(W, "Claude Code caches these; we never fetch them.",
+                     "Claude Code caches these.", ""),
+                "",
+                pick(W, "On a plan the % is what stops you --",
+                     "the % is what stops you --", "the % stops you;"),
+                pick(W, "the $ above is a workload estimate.",
+                     "$ is an estimate.")):
+        out.append(line("%s%s%s" % (GREY, txt, RESET)) if txt else line())
     if LIM_STALE:
-        out.append(line("%s~ cache is stale%s" % (YELLOW, RESET)))
+        out.append(line("%s%s%s" % (YELLOW, pick(
+            W, "~ cached figure, may have moved", "~ cached, may have moved",
+            "~ may have moved", "~ stale"), RESET)))
 
 
 def tab_models():
-    sect("MODELS", "%d turns" % turns)
+    sect("MODELS", "%d turns · %s" % (turns, money(tot_cost)),
+         "%d turns" % turns)
     if not models:
         out.append(line("  %sno priced usage yet%s" % (GREY, RESET)))
         return
@@ -615,31 +763,31 @@ def tab_models():
         name = short_model(n)
         col = model_color(name)
         mark = "" if pricing.is_exact(n) else "~"
+        share = (100.0 * m["cost"] / tot_cost) if tot_cost else 0.0
+        out.append(line())
         out.append(line(fit([
-            ("%s%s%s%s" % (BOLD, col, name[:max(8, W - 16)], RESET), True),
-            (" %s%s%s%s" % (mark, GREEN, money(m["cost"]), RESET), True),
-            (" %s%d turns%s" % (GREY, m["turns"], RESET), False)])))
-        out.append(line(fit([
-            ("  %sin %s%-7s%s" % (GREY, WHITE, human(m["input"]), RESET), True),
-            ("%sout %s%s%s" % (GREY, WHITE, human(m["output"]), RESET), False)])))
-        out.append(line(fit([
-            ("  %sread %s%-5s%s" % (GREY, WHITE, human(m["cache_read"]), RESET), True),
-            ("%swrite %s%s%s" % (GREY, WHITE, human(m["cache_creation"]), RESET), False)])))
+            ("%s%s%s%s" % (BOLD, col, name[:max(8, W - 22)], RESET), True),
+            ("  %s%s%s%s" % (mark, GREEN, money(m["cost"]), RESET), True),
+            (" %s· %d%% of session%s" % (GREY, round(share), RESET), False),
+            (" %s· %d turns%s" % (GREY, m["turns"], RESET), False)])))
+        cells([("input", human(m["input"])), ("output", human(m["output"])),
+               ("cache read", human(m["cache_read"])),
+               ("cache write", human(m["cache_creation"]))], out)
         if m["cache_1h"] or m["cache_5m"]:
             # Why a cache-heavy session costs what it does: a 1h write is 2x
             # input, a 5m write 1.25x. Collapsing them hides ~15%.
-            out.append(line("    %s1h %s (2x) · 5m %s%s" % (
+            out.append(line("  %s  of which 1h %s (2x) · 5m %s%s" % (
                 GREY, human(m["cache_1h"]), human(m["cache_5m"]), RESET)))
         seen = m["cache_read"] + m["input"] + m["cache_creation"]
         if seen:
             hit = 100.0 * m["cache_read"] / seen
             per = m["cost"] / m["turns"] if m["turns"] else 0.0
             out.append(line(fit([
-                ("  %scache %d%%%s" % (GREEN, round(hit), RESET), True),
-                (" %s· %s/turn%s" % (GREY, money(per), RESET), False)])))
+                ("  %scache hits %s%d%%%s" % (GREY, GREEN, round(hit), RESET), True),
+                (" %s· %s per turn%s" % (GREY, money(per), RESET), False)])))
     if estimated:
         out.append(line())
-        out.append(line("%s~ estimated rate%s" % (GREY, RESET)))
+        out.append(line("%s~ estimated rate, not a published one%s" % (GREY, RESET)))
 
 
 def tab_agents():
@@ -647,25 +795,32 @@ def tab_agents():
     if not agents:
         sect("AGENTS")
         out.append(line("  %snone in this session%s" % (GREY, RESET)))
+        out.append(line("  %sTask agents and teammates would%s" % (GREY, RESET)))
+        out.append(line("  %sbe listed here with their spend.%s" % (GREY, RESET)))
         return
     share = (100.0 * sess["agent_cost"] / tot_cost) if tot_cost else 0.0
-    sect("AGENTS", "%d · %d%%" % (len(agents), round(share)))
-    aw = 10 if TIGHT else 14
+    sect("AGENTS", "%d · %d%% of session spend" % (len(agents), round(share)),
+         "%d · %d%% of spend" % (len(agents), round(share)),
+         "%d agents" % len(agents))
+    lw = max(6, min(16, W - 26))
     now = time.time()
     for ag in agents[:8]:
         named = [x for x in ag["models"] if pricing.is_priceable(x)]
         mods = "+".join(short_model(x).split("-")[0] for x in named[:2])
-        out.append(line(fit([
-            ("  %s%-*s%s" % (WHITE, aw, ag["name"][:aw], RESET), True),
-            (" %s%7s%s" % (GREEN, money(ag["cost"]), RESET), True),
-            (" %s%s%s" % (GREY, mods[:12], RESET), False),
-            (" %s%s%s" % (GREY, dur(now - ag["last"]) if ag.get("last") else "", RESET), False)])))
+        frac = (ag["cost"] / tot_cost) if tot_cost else 0
+        # "8s" alone needed a column header to mean anything; "8s ago" does not.
+        last = "%s ago" % dur(now - ag["last"]) if ag.get("last") else ""
+        tail = " · ".join(x for x in (mods[:12], last) if x)
+        bar_row(ag["name"], frac, money(ag["cost"]), tail, CYAN, out, lw=lw)
     if len(agents) > 8:
         out.append(line("  %s+%d more%s" % (GREY, len(agents) - 8, RESET)))
     out.append(line())
-    out.append(line(fit([
-        ("  %syou%s %s%s%s" % (GREY, RESET, GREEN, money(sess["self_cost"]), RESET), True),
-        ("  %sagents%s %s%s%s" % (GREY, RESET, GREEN, money(sess["agent_cost"]), RESET), False)])))
+    # Who actually spent the money: the split is the reason this tab exists.
+    whole = tot_cost or 1.0
+    bar_row("you", sess["self_cost"] / whole, money(sess["self_cost"]),
+            "%d%%" % round(100.0 * sess["self_cost"] / whole), GREEN, out, lw=lw)
+    bar_row("agents", sess["agent_cost"] / whole, money(sess["agent_cost"]),
+            "%d%%" % round(share), CYAN, out, lw=lw)
 
 
 def tab_trend():
@@ -677,29 +832,40 @@ def tab_trend():
         sect("TREND")
         out.append(line("  %sno history cache yet%s" % (GREY, RESET)))
         return
-    sect("7 DAYS", "account-wide")
+    sect("7 DAYS", "tokens · account-wide", "account-wide", "tokens")
     days = hist["days"]
     peak = max((d["tokens"] for d in days), default=0) or 1
+    today = time.strftime("%Y-%m-%d", time.localtime())
+    yday = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
     for d in days:
-        frac = d["tokens"] / float(peak)
-        bar = BARS[min(len(BARS) - 1, int(frac * (len(BARS) - 1)))]
-        label = d["date"][5:] if len(d["date"]) >= 10 else d["date"]
-        out.append(line(fit([
-            ("  %s%-5s%s " % (GREY, label, RESET), True),
-            ("%s%s%s" % (BLUE, bar, RESET), True),
-            (" %s%7s%s" % (WHITE, human(d["tokens"]), RESET), True),
-            (" %s%s%s" % (GREY, short_model(d["models"][0]).split("-")[0]
-                          if d["models"] else "", RESET), False)])))
-    out.append(line())
-    out.append(line(fit([
-        ("  %s%d sessions%s" % (GREY, hist["sessions"], RESET), True),
-        (" %s· %s msgs%s" % (GREY, human(hist["messages"]), RESET), False)])))
+        # A named row beats a date: "today" is the one people look for first.
+        if d["date"] == today:
+            label = "today"
+        elif d["date"] == yday:
+            label = "yest"
+        else:
+            label = d["date"][5:] if len(d["date"]) >= 10 else d["date"]
+        bar_row(label, d["tokens"] / float(peak), human(d["tokens"]),
+                short_model(d["models"][0]).split("-")[0] if d["models"] else "",
+                BLUE, out, lw=5)
+    # These are lifetime totals, not the seven days above them -- under a
+    # "7 DAYS" heading they read as the week's, which is wrong by two orders
+    # of magnitude. Their own heading is the cheapest possible fix.
+    sect("ALL TIME")
+    kv("sessions", "%d" % hist["sessions"], out, kw=8)
+    kv("messages", human(hist["messages"]), out, kw=8)
     if hist.get("since"):
-        out.append(line("  %ssince %s%s" % (GREY, hist["since"], RESET)))
+        kv("since", hist["since"], out, kw=8)
     if hist.get("stale"):
         # Rebuilt once a day by Claude Code, so today is usually missing.
-        out.append(line("%s~ rebuilt daily; today may%s" % (GREY, RESET)))
-        out.append(line("%s  be missing%s" % (GREY, RESET)))
+        out.append(line())
+        one = pick(W, "~ Claude Code rebuilds this once a day, "
+                      "so today may be missing")
+        if one:
+            out.append(line("%s%s%s" % (GREY, one, RESET)))
+        else:
+            out.append(line("%s~ rebuilt once a day, so%s" % (GREY, RESET)))
+            out.append(line("%s  today may be missing%s" % (GREY, RESET)))
 
 
 def tab_account():
@@ -708,40 +874,46 @@ def tab_account():
     sect("ACCOUNT")
     if not ident:
         out.append(line("  %shidden or unavailable%s" % (GREY, RESET)))
-    if ident and ident.get("name"):
-        out.append(line("  %s%s%s" % (WHITE, clip(ident["name"], max(0, W - 2)), RESET)))
-    if ident and ident.get("email"):
-        out.append(line("  %s%s%s" % (GREY, clip(ident["email"], max(0, W - 2)), RESET)))
-    if ident and ident.get("org"):
-        out.append(line("  %s%s%s" % (GREY, clip(ident["org"], max(0, W - 2)), RESET)))
-    bits = [b for b in ((ident or {}).get("plan"), (ident or {}).get("billing"),
-                        (ident or {}).get("role")) if b]
-    if bits:
-        out.append(line(fit([
-            ("  %s%s%s" % (YELLOW, bits[0], RESET), True),
-            (" %s· %s%s" % (GREY, " · ".join(bits[1:]), RESET), False)])))
-    if ident and ident.get("since"):
-        out.append(line("  %ssince %s%s" % (
-            GREY, time.strftime("%d %b %Y", time.localtime(ident["since"])), RESET)))
-    if ident and not ident.get("email"):
-        out.append(line("  %sCBM_ACCOUNT=full for email%s" % (GREY, RESET)))
+    if ident:
+        if ident.get("name"):
+            kv("name", clip(ident["name"], max(0, W - 11)), out, kw=8)
+        if ident.get("email"):
+            kv("email", clip(ident["email"], max(0, W - 11)), out, kw=8, col=GREY)
+        if ident.get("org"):
+            kv("org", clip(ident["org"], max(0, W - 11)), out, kw=8, col=GREY)
+        if ident.get("plan"):
+            kv("plan", ident["plan"], out, kw=8, col=YELLOW)
+        if ident.get("billing"):
+            kv("billing", ident["billing"], out, kw=8, col=GREY)
+        if ident.get("role"):
+            kv("role", ident["role"], out, kw=8, col=GREY)
+        if ident.get("since"):
+            kv("since", time.strftime("%d %b %Y", time.localtime(ident["since"])),
+               out, kw=8, col=GREY)
+        if not ident.get("email"):
+            out.append(line("  %sCBM_ACCOUNT=full adds email%s" % (GREY, RESET)))
 
     sect("SESSION")
     if meta.get("title"):
         out.append(line("  %s%s%s" % (WHITE, clip(meta["title"], max(0, W - 2)), RESET)))
-    out.append(line(fit([
-        ("  %s%s%s" % (GREY, sid[:8], RESET), True),
-        (" %s· %s%s" % (GREY, os.path.basename((meta.get("cwd") or "").rstrip("/")), RESET), False)])))
+        out.append(line())
+    kv("id", sid[:8], out, kw=8, col=GREY)
+    proj = os.path.basename((meta.get("cwd") or "").rstrip("/"))
+    if proj:
+        kv("folder", proj, out, kw=8, col=GREY)
     br = meta.get("branch")
     if br and br != "HEAD":
-        out.append(line("  %sbranch %s%s" % (GREY, br, RESET)))
+        kv("branch", br, out, kw=8, col=GREY)
     ef = [x for x in (meta.get("effort"), meta.get("pmode")) if x]
     if ef:
-        out.append(line("  %s%s%s" % (GREY, " · ".join(ef), RESET)))
+        kv("mode", " · ".join(ef), out, kw=8, col=GREY)
     if meta.get("version"):
-        out.append(line("  %sclaude code %s%s" % (GREY, meta["version"], RESET)))
+        kv("client", "claude code %s" % meta["version"], out, kw=8, col=GREY)
     if sess.get("started"):
-        out.append(line("  %sup %s%s" % (GREY, dur(time.time() - sess["started"]), RESET)))
+        kv("started", pick(max(0, W - 12),
+                           "%s · up %s" % (hm(sess["started"]),
+                                           dur(time.time() - sess["started"])),
+                           dur(time.time() - sess["started"])), out, kw=8, col=GREY)
 
 
 # ---- compose --------------------------------------------------------------
@@ -751,22 +923,68 @@ draw_tabs()
 
 out.append(line())
 if SHOW_TABS and os.environ.get("CBM_HELP") == "1":
-    out.append(line("%s<- ->  or Tab  switch tab%s" % (GREY, RESET)))
-    out.append(line("%s1-6        jump to tab%s" % (GREY, RESET)))
-    out.append(line("%sr          redraw now%s" % (GREY, RESET)))
-    out.append(line("%sq          drop to a shell%s" % (GREY, RESET)))
+    out.append(line("%sKEYS%s" % (BOLD, RESET)))
+    for k, what in (("<- ->", "previous / next tab"),
+                    ("Tab", "next tab"),
+                    ("1-6", "jump to tab"),
+                    ("r", "redraw now"),
+                    ("?", "this list"),
+                    ("q", "drop to a shell"),
+                    ("Ctrl-C", "drop to a shell")):
+        out.append(line("  %s%-7s%s%s%s" % (WHITE, k, GREY, what, RESET)))
+    out.append(line())
+    out.append(line("%s~ marks a figure we can't vouch%s" % (GREY, RESET)))
+    out.append(line("%s  for as current or exact%s" % (GREY, RESET)))
     out.append(line())
 if SHOW_TABS:
-    out.append(line(fit([("%slive%s" % (GREY, ""), True),
-                         (" · <> tabs", False),
+    out.append(line(fit([("%supdates live%s" % (GREY, ""), True),
+                         (" · arrows or 1-6", False),
                          (" · ? keys", False),
+                         (" · q shell", False),
                          ("%s" % RESET, True)])))
 else:
-    out.append(line(fit([("%slive%s" % (GREY, ""), True),
-                         (" · updates on change", False),
+    out.append(line(fit([("%supdates live%s" % (GREY, ""), True),
+                         (" · on change", False),
                          (" · Ctrl-C to stop", False),
                          ("%s" % RESET, True)])))
-print("\n".join(out))
+if sys.stdout.isatty():
+    # Paint in place, and NEVER move the cursor with a newline.
+    #
+    # This is the ghost frame's actual cure, and it is stricter than it looks.
+    # A terminal banks a line into scrollback when that line leaves the screen
+    # -- which happens on a scroll, or when an app hands over a whole frame to
+    # erase. Every earlier attempt still did one of those: macOS `clear` banks
+    # via its trailing ED2 (one ghost per frame, all but the last dropped by
+    # its ED3), and an erase-down on the alternate screen banks the frame it
+    # erased on iTerm2, whose "save lines to scrollback in alternate screen
+    # mode" is on by default (a ghost per frame, and nothing to drop them).
+    #
+    # So: no erase wider than a single row, and no LF anywhere. Each row is
+    # addressed absolutely, overwritten, and erased only to its own end. The
+    # cursor is never advanced off a row, so the screen cannot scroll and no
+    # line can leave it -- on any terminal, in either buffer. Rows past the
+    # panel are blanked the same way, so a shorter frame cannot leave the tail
+    # of a longer one behind.
+    #
+    # Autowrap is off for the duration: a row that measures wider than the pane
+    # (a font disagreeing with us about a glyph's width, say) would otherwise
+    # wrap onto the next row and push the last one off. Restored per frame, so
+    # a pane that drops to a shell never inherits it.
+    #
+    # Truncating past the last row is deliberate: a panel taller than the pane
+    # used to scroll, which both banked lines AND pushed the header (the part
+    # worth seeing) off the top. Losing the tail is the better trade.
+    rows = max(2, term_size()[0])           # re-read: the pane may have resized
+    body = out[:rows]
+    frame = ["\033[?7l"]                    # autowrap off
+    for i, s in enumerate(body):
+        frame.append("\033[%d;1H%s\033[K" % (i + 1, s))
+    for i in range(len(body) + 1, rows + 1):
+        frame.append("\033[%d;1H\033[K" % i)
+    frame.append("\033[?7h")                # autowrap back on
+    sys.stdout.write("".join(frame))
+else:
+    print("\n".join(out))
 
 try:
     scan.save()
