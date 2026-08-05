@@ -7,19 +7,42 @@ project uses [Semantic Versioning](https://semver.org/).
 ## [0.11.0] - 2026-08-04
 
 ### Fixed
-- **The ghost panel in scrollback.** Scrolling up in the monitor pane showed a
-  second copy of the panel with older numbers. The panel redraws in place, and
-  erasing the *primary* screen buffer does not discard the old frame — the
-  terminal scrolls it into scrollback first. macOS `clear(1)` makes this exact:
-  it emits `ESC[3J ESC[H ESC[2J`, dropping the scrollback and *then* banking the
-  frame it just erased, which is why precisely one ghost survived every redraw.
+- **The ghost panel in scrollback.** Scrolling up in the monitor pane found the
+  panel again, showing older numbers. A terminal banks a line into scrollback
+  when that line leaves the screen — on a scroll, or when an application hands
+  over a whole frame to erase — and a panel that redraws on every change was
+  doing the latter every few seconds. macOS `clear(1)` makes it exact: it emits
+  `ESC[3J ESC[H ESC[2J`, dropping the scrollback and *then* banking the frame it
+  just erased, which is why precisely one ghost survived each redraw.
 
-  The panel now runs on the **alternate screen buffer**, the one `vim`, `less`
-  and `htop` use. It has no scrollback, so there is nothing to accumulate, and
-  leaving it restores whatever the pane showed before. Every exit path hands the
-  screen back, including `q` and `Ctrl-C`, which `exec` a shell rather than
-  returning. `CBM_ALTSCREEN=0` opts out and clears scrollback *after* erasing
-  instead — the same fix without the buffer switch.
+  The panel therefore **erases nothing**. Each row is addressed absolutely,
+  overwritten, and erased only to its own end; rows below the panel are blanked
+  the same way, autowrap is off for the duration, and no newline is emitted at
+  all. The cursor is never advanced off a row, so the screen cannot scroll and
+  no line can leave it — on any terminal, in either screen buffer.
+
+  Two things had to be true for this to keep holding, and neither was:
+
+  - `$LINES`/`$COLUMNS` are now ignored outright. A pane inherits them from the
+    window it was split out of, so they describe a *larger* screen than the pane
+    owns — and everything downstream believes them, `tput` and Python's
+    `shutil.get_terminal_size()` included. Painting a pane to its window's
+    height is a scroll. The size comes from the tty itself now, and resizes
+    with it.
+  - The watcher **re-execs itself when its own file changes**. `bash` reads a
+    script from an open descriptor by offset as it runs, so a pane open for days
+    keeps executing the build it started with no matter what is installed. Two
+    earlier attempts at this bug looked like failures for exactly that reason.
+    The successor is syntax-checked before being `exec`'d, so an update caught
+    mid-write can never close the pane.
+
+  The panel also runs on the **alternate screen buffer** — the one `vim`, `less`
+  and `htop` use — so the pane's previous contents come back when it exits. That
+  is now presentation, not the fix: iTerm2 saves alternate-screen lines to
+  scrollback by default, so an erase there banked a copy per redraw with nothing
+  to drop the pile. Every exit path hands the screen back, including `q` and
+  `Ctrl-C`, which `exec` a shell rather than returning. `CBM_ALTSCREEN=0` opts
+  out of the buffer; that path clears scrollback *after* erasing.
 
 ### Changed
 - **Every number now says what it is.** The panel had accumulated bare figures

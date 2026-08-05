@@ -1288,25 +1288,33 @@ class TestWatchKeys(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    # The pane's real size, set on the pty itself. $LINES/$COLUMNS deliberately
+    # disagree: a split pane inherits the WINDOW's size that way, and believing
+    # it is how the panel used to paint past the last row and scroll.
+    ROWS, COLS = 40, 60
+
     def _env(self):
         e = dict(os.environ)
-        e.update({"HOME": self.home, "COLUMNS": "60", "LINES": "40",
+        e.update({"HOME": self.home, "COLUMNS": "500", "LINES": "200",
                   "CBM_NO_NETWORK": "1", "TERM": "xterm-256color",
                   "XDG_STATE_HOME": os.path.join(self.tmp, "state"),
                   "XDG_CONFIG_HOME": os.path.join(self.tmp, "config")})
         return e
 
-    def _drive(self, keys, settle=1.2, env=None):
+    def _drive(self, keys, settle=1.2, env=None, script=None, mutate=None):
         """Run the watcher on a pty, send `keys`, return everything it drew."""
-        import pty, select, signal
+        import pty, select, signal, fcntl, termios, struct
         pid, fd = pty.fork()
         if pid == 0:                                   # child: the watcher
             os.environ.update(self._env())
             os.environ.update(env or {})
             try:
-                os.execv("/bin/sh", ["sh", self.watch, self.sid, self.path, "1"])
+                os.execv("/bin/sh", ["sh", script or self.watch,
+                                     self.sid, self.path, "1"])
             finally:
                 os._exit(1)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ,
+                    struct.pack("HHHH", self.ROWS, self.COLS, 0, 0))
         buf = b""
 
         def pump(seconds):
@@ -1321,6 +1329,8 @@ class TestWatchKeys(unittest.TestCase):
                         return
         try:
             pump(settle)
+            if mutate:
+                mutate()
             for k in keys:
                 os.write(fd, k)
                 pump(0.8)
@@ -1375,6 +1385,121 @@ class TestWatchKeys(unittest.TestCase):
         # ED2 on the primary buffer is precisely what banks the ghost frame.
         body = out.split("\033[?1049h", 1)[1]
         self.assertNotIn("\033[2J", body, "cleared the primary buffer while on alt")
+
+    def test_nothing_the_watcher_draws_can_reach_the_scrollback(self):
+        """The ghost frame, and the two wrong theories it survived.
+
+        A terminal banks a line into scrollback when the line leaves the
+        screen: on a scroll, or when an app hands over a frame to erase. The
+        first fix moved the panel to the alternate buffer, assuming that buffer
+        had no scrollback -- iTerm2 saves it by default, so an erase-down there
+        banked a copy per redraw, worse than the `clear` it replaced. The
+        second fix stopped erasing but still ended each row with a newline, one
+        scroll away from the same bug if the height was ever misjudged.
+
+        So this asserts the property rather than any one mechanism: over a run
+        with redraws and tab switches, nothing the watcher emits can push a
+        line off the screen. No erase wider than a single row, no newline at
+        all, and -- replayed through a cursor model at the pty's real size --
+        no write below the last row and no wrap past the last column.
+        """
+        out = self._drive([b"\033[C", b"3", b"\033[D"])
+        after = out.split("\033[?1049h", 1)[1]
+        frames = len(re.findall(r"\033\[1;1H", after))
+        self.assertGreaterEqual(frames, 2, "expected a redraw")
+        self.assertIn("\033[K", after, "not painting in place")
+        self.assertEqual(after.count("\n"), 0, "a newline can scroll the screen")
+        for seq, what in ((r"\033\[[0123]?J", "erased the screen"),
+                          (r"\033\[[0-9;]*S", "scrolled the screen up")):
+            self.assertIsNone(re.search(seq, after), what)
+
+        row, col, wrap, lowest, wrapped = 1, 1, True, 1, 0
+        i = 0
+        while i < len(after):
+            m = re.match(r"\033\[(\d*);?(\d*)([Hf])|\033\[\?7([lh])"
+                         r"|\033\[[0-9;?]*[A-Za-z]", after[i:])
+            if m:
+                if m.group(3):
+                    row, col = int(m.group(1) or 1), int(m.group(2) or 1)
+                elif m.group(4):
+                    wrap = m.group(4) == "h"
+                i += m.end()
+            else:
+                if after[i] == "\r":
+                    col = 1
+                else:
+                    col += 1
+                    if col > self.COLS and wrap:
+                        wrapped, col, row = wrapped + 1, 1, row + 1
+                i += 1
+            lowest = max(lowest, row)
+        self.assertEqual(wrapped, 0, "a row wrapped, pushing the last one off")
+        self.assertLessEqual(lowest, self.ROWS, "wrote below the last row")
+
+    def test_the_panel_measures_the_pane_not_the_window(self):
+        """$LINES/$COLUMNS describe the window a split pane was carved out of.
+
+        The env in this harness claims 200x500 against a 40x60 pty on purpose.
+        Believing it paints 200 rows into a 40-row pane, which scrolls -- the
+        ghost again, by the back door. Every consumer must ask the tty, so the
+        watcher drops both variables outright.
+        """
+        out = self._drive([b"\033[C"])
+        after = out.split("\033[?1049h", 1)[1]
+        addressed = [int(n) for n in re.findall(r"\033\[(\d+);1H", after)]
+        self.assertTrue(addressed, "panel is not addressing rows absolutely")
+        self.assertLessEqual(max(addressed), self.ROWS,
+                             "addressed a row the pane does not have")
+        self.assertGreaterEqual(max(addressed), self.ROWS - 2,
+                                "painted only part of the pane")
+
+    def test_a_patched_watcher_reaches_a_pane_that_is_already_running(self):
+        """bash reads this script from an open fd by offset as it runs.
+
+        So a pane that has been open for days keeps executing the build it
+        started with, whatever is on disk -- which is why two earlier fixes for
+        the ghost frame looked like they had failed when they had not. The
+        watcher notices its own file changing and re-execs into it.
+        """
+        script = self._script_copy()
+
+        # Renamed into place, which is how an install lands and the only safe
+        # way: rewriting the file underneath a running bash makes it read the
+        # new bytes from its old offset, and it dies on the spot.
+        out = self._drive([b"\033[C"], script=script,
+                          mutate=lambda: self._swap(script, "printf RESPAWNED\n"
+                                                            "sleep 5\n"))
+        self.assertIn("RESPAWNED", out, "kept running the replaced script")
+
+    def test_a_half_written_watcher_is_never_exec_into(self):
+        """An update is not atomic from here; catching the file mid-write and
+        exec'ing it would close the pane. Syntax-check before trusting it."""
+        script = self._script_copy()
+        out = self._drive([b"\033[C"], script=script,
+                          mutate=lambda: self._swap(script, "while true; do\n"))
+        self.assertNotIn("syntax error", out.lower())
+        self.assertIn("\033[K", out, "stopped painting instead of carrying on")
+
+    def _swap(self, path, body):
+        """Replace `path` by rename, the way an install or an upgrade does."""
+        tmp = path + ".new"
+        with open(tmp, "w") as f:
+            f.write("#!/usr/bin/env bash\n" + body)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)
+
+    def _script_copy(self):
+        """A writable watch.sh laid out the way the plugin is: the script
+        resolves lib/ relative to its own directory, so a bare copy in a temp
+        dir exits at the first `.` instead of running."""
+        root = os.path.join(self.tmp, "plugin")
+        os.makedirs(os.path.join(root, "bin"), exist_ok=True)
+        lib = os.path.join(root, "lib")
+        if not os.path.exists(lib):
+            os.symlink(os.path.abspath(os.path.join(HERE, "..", "lib")), lib)
+        script = os.path.join(root, "bin", "watch.sh")
+        shutil.copy(self.watch, script)
+        return script
 
     def test_dropping_to_a_shell_hands_the_screen_back(self):
         """Leaving the panel must restore the buffer and the cursor, or the

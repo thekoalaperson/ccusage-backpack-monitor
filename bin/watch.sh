@@ -39,19 +39,36 @@ fi
 
 gray() { printf '\033[90m%s\033[0m\n' "$1"; }
 
+# $LINES/$COLUMNS are inherited from whatever opened this pane, and in a split
+# they describe the WINDOW: taller and wider than the pane we actually own.
+# Everything downstream believes them if they exist -- `tput lines` does,
+# python's shutil.get_terminal_size() does -- and painting a pane to the
+# window's height is a scroll, which is how a frame reaches the scrollback.
+# Drop them once, here, and let every consumer ask the tty instead.
+unset LINES COLUMNS
+
 # ---------------------------------------------------------------------------
 # Screen handling. The panel redraws in place, so it belongs on the ALTERNATE
-# screen buffer -- the one vim, less and htop use.
+# screen buffer -- the one vim, less and htop use -- which leaves whatever the
+# pane showed before intact underneath.
 #
-# This is not cosmetic. Erasing the *primary* buffer does not discard the old
-# frame: terminals scroll it into scrollback first. A panel that redraws on
-# every change therefore stacks a ghost copy of every frame it has ever drawn
-# above the visible one, so scrolling up finds the panel again showing older
-# numbers. The alternate buffer has no scrollback, so there is nothing to
-# accumulate, and leaving it restores whatever the pane showed before.
+# What the alternate buffer does NOT do is stop the ghost frames, and believing
+# it did cost two rounds of this bug. A terminal banks a line into scrollback
+# when the line leaves the screen, and erasing the screen counts: iTerm2's
+# "save lines to scrollback in alternate screen mode" is ON by default, so an
+# erase-down here banked the very frame it erased, once per redraw, with
+# nothing to drop the pile. That was strictly worse than the primary buffer,
+# where macOS `clear` at least dropped its own scrollback (\033[3J) before
+# banking the frame -- which is why the original bug showed exactly one ghost.
 #
-# CBM_ALTSCREEN=0 opts out; that path clears scrollback explicitly (\033[3J)
-# instead, which fixes the same ghosting on any terminal that honours it.
+# The cure is therefore not a buffer but a discipline: erase nothing. After the
+# single clear below, the panel addresses each row absolutely, overwrites it and
+# erases only to its own end, never emitting a newline. Nothing leaves the
+# screen, so nothing can be banked. Everything here is now just etiquette:
+# borrow a buffer, hide the cursor, and hand both back on the way out.
+#
+# CBM_ALTSCREEN=0 opts out of the buffer; that path drops scrollback explicitly
+# (\033[3J AFTER the erase, or it drops everything but the frame just banked).
 # ---------------------------------------------------------------------------
 altscreen=0
 if [ "${CBM_ALTSCREEN:-1}" != "0" ] && [ -t 1 ] &&
@@ -74,11 +91,30 @@ screen_leave() {
 }
 
 screen_clear() {
-  if [ "$altscreen" = 1 ]; then
-    printf '\033[H\033[J'            # home, erase down: no scroll, no ghost
-  else
-    printf '\033[H\033[2J\033[3J'    # ...and drop the scrollback we just filled
-  fi
+  printf '\033[H\033[2J\033[3J'      # erase, THEN drop the scrollback it banked
+}
+
+# Wipe the screen the way the panel draws it: every row addressed, overwritten
+# and erased only to its own end, with no newline and no screen-wide erase.
+# Slower than \033[2J and that is the entire point -- an erase is how a frame
+# gets handed to the terminal to bank, which is the bug this file is about.
+screen_blank() {
+  local rows r
+  rows="$(tput lines 2>/dev/null)"
+  case "$rows" in ''|*[!0-9]*) rows="${LINES:-24}" ;; esac
+  case "$rows" in ''|*[!0-9]*) rows=24 ;; esac
+  printf '\033[?7l'
+  r=1
+  while [ "$r" -le "$rows" ]; do printf '\033[%d;1H\033[K' "$r"; r=$((r + 1)); done
+  printf '\033[H\033[?7h'
+}
+
+# Start a fresh screen. On the alternate buffer nothing may be erased, ever; the
+# buffer arrives blank anyway, so this is belt and braces. Without it we DO want
+# a real clear, to drop both the shell's leftovers and any scrollback banked by
+# an older build of this script.
+screen_reset() {
+  if [ "$altscreen" = 1 ]; then screen_blank; else screen_clear; fi
 }
 
 # exec replaces this process, so the EXIT trap never runs on that path.
@@ -103,11 +139,18 @@ interactive=0
 if [ "${CBM_TABS:-1}" != "0" ] && [ -t 0 ]; then interactive=1; fi
 
 # Rich python panel when available; otherwise fall back to plain ccusage output.
+#
+# The panel paints itself in place (cursor home, every row overwritten and
+# erased to its own end), so it needs no clear beforehand. The ccusage fallback
+# is plain text with no cursor control, so that branch has to wipe first -- and
+# it is the one path here that genuinely scrolls, being output of unknown
+# length. It only runs when python3 is missing entirely.
 render() {
   if [ -n "$py" ] && [ -f "$here/../lib/render.py" ]; then
     "$py" "$here/../lib/render.py" "$sid" "$transcript" "$tab" 2>/dev/null && return
   fi
   [ -n "$ccu" ] || return 0
+  screen_reset
   eval "$ccu session -i $(cbm_shq "$sid")" 2>&1
   gray ""
   gray "session ${sid:0:8}  |  live (updates on change)  |  Ctrl-C to stop"
@@ -171,18 +214,35 @@ screen_enter
 trap 'screen_leave' EXIT
 trap 'shell_out' INT
 
+# The only screen-wide wipe of the whole run. After this the panel overwrites
+# itself in place, so nothing is ever handed to the terminal to dispose of.
+screen_reset
+
+# A pane can stay open for days, and bash reads this script from an open file
+# descriptor by offset as it goes -- so an updated or patched watcher cannot
+# take effect in a pane that is already running, no matter what is on disk.
+# That is not a footnote: it is why two fixes for the ghost frame above looked
+# like they had failed. Notice our own file changing and re-exec into it.
+self_sig="$(cbm_stat_sig "$0" 2>/dev/null)"
+
 # Sentinel (not "") so the first iteration always renders — and so a host where
 # stat yields no signature still renders once before idling, rather than never.
 last="__init__"
 force=0
+waiting=0
 while true; do
   locate
   if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
-    screen_clear
-    gray "waiting for session ${sid:0:8} data..."
+    # Clear once on the way into this state, then just overwrite the row --
+    # erasing per poll would bank a frame per poll, the panel's own bug at a
+    # slower tempo. \033[K after the text, so a longer previous row can't show
+    # through the end of a shorter one.
+    [ "$waiting" = 1 ] || { waiting=1; screen_reset; }
+    printf '\033[H\033[90mwaiting for session %s data...\033[0m\033[K' "${sid:0:8}"
     if [ "$interactive" = 1 ]; then read_key; else sleep "$poll"; fi
     continue
   fi
+  waiting=0
 
   # The race the hook cannot win: at SessionStart a teammate's transcript may
   # still be empty, which is indistinguishable from a brand-new human session.
@@ -202,7 +262,18 @@ while true; do
     last="$sig"
     force=0
     resized=0
-    screen_clear
+    # Checked here rather than in the poll: this branch had already decided to
+    # do work, so picking up an update costs one stat on a path that is not the
+    # idle one. `bash -n` guards against exec'ing a half-written file, and a
+    # missing or empty $0 (an upgrade that moved the version directory out from
+    # under us) simply means carry on. We do NOT leave the alternate screen
+    # first: the successor re-enters it immediately, and switching out and back
+    # is itself a frame the terminal could bank.
+    new_sig="$(cbm_stat_sig "$0" 2>/dev/null)"
+    if [ -n "$new_sig" ] && [ -n "$self_sig" ] && [ "$new_sig" != "$self_sig" ] &&
+       [ -s "$0" ] && "${BASH:-bash}" -n "$0" 2>/dev/null; then
+      exec "${BASH:-bash}" "$0" "$@"
+    fi
     # The key list is a one-shot: shown on the render right after `?`, gone on
     # the next one, so it can never become clutter in a 25%-width pane.
     if [ "$help_once" = 1 ]; then

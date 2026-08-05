@@ -80,7 +80,27 @@ def _tab_index(arg):
 
 TAB = _tab_index(sys.argv[3] if len(sys.argv) > 3 else "") if SHOW_TABS else 0
 
-W = shutil.get_terminal_size((48, 24)).columns
+def term_size():
+    """This pane's size, asked of the terminal itself.
+
+    Deliberately not shutil.get_terminal_size(), which prefers $COLUMNS/$LINES.
+    A pane inherits those from whatever opened it, and in a split they describe
+    the *window*: believing them makes the panel paint more rows than the pane
+    has, which scrolls -- and a scrolled line is exactly what ends up haunting
+    the scrollback. The ioctl answers for this tty and resizes with it.
+    """
+    for f in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            sz = os.get_terminal_size(f.fileno())
+            if sz.columns > 0 and sz.lines > 0:
+                return sz.lines, sz.columns
+        except Exception:
+            pass
+    sz = shutil.get_terminal_size((48, 24))     # not a tty: piped, or a test
+    return max(2, sz.lines), sz.columns
+
+
+ROWS, W = term_size()
 # Clamp only the UPPER bound. A lower floor would make the panel render wider
 # than the pane and wrap, which is the bug this replaced.
 W = max(8, min(W, 72))
@@ -927,7 +947,44 @@ else:
                          (" · on change", False),
                          (" · Ctrl-C to stop", False),
                          ("%s" % RESET, True)])))
-print("\n".join(out))
+if sys.stdout.isatty():
+    # Paint in place, and NEVER move the cursor with a newline.
+    #
+    # This is the ghost frame's actual cure, and it is stricter than it looks.
+    # A terminal banks a line into scrollback when that line leaves the screen
+    # -- which happens on a scroll, or when an app hands over a whole frame to
+    # erase. Every earlier attempt still did one of those: macOS `clear` banks
+    # via its trailing ED2 (one ghost per frame, all but the last dropped by
+    # its ED3), and an erase-down on the alternate screen banks the frame it
+    # erased on iTerm2, whose "save lines to scrollback in alternate screen
+    # mode" is on by default (a ghost per frame, and nothing to drop them).
+    #
+    # So: no erase wider than a single row, and no LF anywhere. Each row is
+    # addressed absolutely, overwritten, and erased only to its own end. The
+    # cursor is never advanced off a row, so the screen cannot scroll and no
+    # line can leave it -- on any terminal, in either buffer. Rows past the
+    # panel are blanked the same way, so a shorter frame cannot leave the tail
+    # of a longer one behind.
+    #
+    # Autowrap is off for the duration: a row that measures wider than the pane
+    # (a font disagreeing with us about a glyph's width, say) would otherwise
+    # wrap onto the next row and push the last one off. Restored per frame, so
+    # a pane that drops to a shell never inherits it.
+    #
+    # Truncating past the last row is deliberate: a panel taller than the pane
+    # used to scroll, which both banked lines AND pushed the header (the part
+    # worth seeing) off the top. Losing the tail is the better trade.
+    rows = max(2, term_size()[0])           # re-read: the pane may have resized
+    body = out[:rows]
+    frame = ["\033[?7l"]                    # autowrap off
+    for i, s in enumerate(body):
+        frame.append("\033[%d;1H%s\033[K" % (i + 1, s))
+    for i in range(len(body) + 1, rows + 1):
+        frame.append("\033[%d;1H\033[K" % i)
+    frame.append("\033[?7h")                # autowrap back on
+    sys.stdout.write("".join(frame))
+else:
+    print("\n".join(out))
 
 try:
     scan.save()

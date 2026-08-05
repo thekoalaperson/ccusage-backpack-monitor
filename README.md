@@ -98,6 +98,10 @@ Point the marketplace at a local checkout instead of GitHub:
 /plugin marketplace add /path/to/ccusage-backpack-monitor
 /plugin install ccusage-backpack-monitor@ccusage-backpack-monitor
 ```
+
+An open pane picks up an updated watcher by itself, on its next redraw — `bash`
+reads a running script from an open descriptor by offset, so without that a pane
+left open for days would keep running the build it started with.
 </details>
 
 ## Commands
@@ -134,7 +138,7 @@ Set these as environment variables before launching `claude`:
 | `NO_COLOR`           | _(unset)_     | Set (any value) to disable ANSI color entirely ([no-color.org](https://no-color.org)). `CBM_BG` overrides it. |
 | `CBM_NO_NETWORK`     | _(unset)_     | `1` pins pricing to the bundled table (no daily refresh) |
 | `CBM_BG`             | _(unset)_     | A 256-color index (e.g. `234`) paints an opaque background card behind the panel — useful in **transparent terminals**. Unset = solid high-contrast text, no fill. |
-| `CBM_ALTSCREEN`      | `1`           | The panel draws on the terminal's **alternate screen**, like `vim` or `less`, so redraws leave nothing in scrollback. `0` draws on the primary buffer instead and clears scrollback after each frame. |
+| `CBM_ALTSCREEN`      | `1`           | The panel draws on the terminal's **alternate screen**, like `vim` or `less`, so the pane's previous contents come back when it exits. `0` draws on the primary buffer instead and clears scrollback on the way in. Either way the panel erases nothing as it runs, so redraws cannot reach scrollback. |
 
 The panel shows **every model used in the session** — including those used by
 subagents — with its own cost, a cost-share bar, and token count. When a session
