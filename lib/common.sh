@@ -3,8 +3,8 @@
 # Sourced (by bash) from bin/open-pane.sh, bin/close-pane.sh, bin/open-now.sh,
 # and bin/watch.sh.
 #
-# Terminal support is pluggable. Each "backend" (iterm, tmux, wezterm) implements
-# four operations as plain functions named cbm_<op>_<backend>:
+# Terminal support is pluggable. Each "backend" (herdr, iterm, tmux, wezterm)
+# implements four operations as plain functions named cbm_<op>_<backend>:
 #     cbm_detect_<be>   -> 0 if this terminal is active
 #     cbm_open_<be>     <cmd> <split>  -> prints an opaque pane handle on stdout
 #     cbm_alive_<be>    <handle>       -> 0 if that pane is still open
@@ -201,6 +201,8 @@ EOF
 # clearly inside. Whether the CLI is actually runnable is handled at open time
 # (cbm_fix_path first, then a graceful return 1 if the split command fails).
 # Vars are read with ${VAR:-} so the detectors are safe even under `set -u`.
+# $TMUX disqualifies herdr: see cbm_backend for why a herdr var can be a ghost.
+cbm_detect_herdr()   { [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] && [ -z "${TMUX:-}" ]; }
 cbm_detect_tmux()    { [ -n "${TMUX:-}" ]; }
 cbm_detect_wezterm() { [ -n "${WEZTERM_PANE:-}" ] || [ "${TERM_PROGRAM:-}" = "WezTerm" ]; }
 cbm_detect_iterm()   { [ "${TERM_PROGRAM:-}" = "iTerm.app" ] || [ -n "${ITERM_SESSION_ID:-}" ]; }
@@ -212,15 +214,35 @@ cbm_is_iterm() { cbm_detect_iterm; }
 # within a process and cheap (a couple of `command -v` + env checks), so the
 # few callers that re-resolve via $(cbm_backend) simply re-run it; the hot path
 # (cbm_open_pane) resolves once into a local and threads it through explicitly.
-# tmux ranks FIRST: $TMUX is set even when tmux runs inside iTerm2/WezTerm, and a
-# GUI split there would live outside the multiplexer's pane tree (alive/close,
-# which speak tmux, could never reconcile it). The multiplexer owns the layout.
-# A pre-set CBM_BACKEND env var forces a backend (handy for tests / overrides);
-# it is assigned, never exported, so a child with a different env re-resolves.
+# The rule is the same at every rank: whatever owns the layout of the pane Claude
+# runs in gets to do the splitting, because the GUI terminal around it must not
+# be split.
+#   herdr FIRST: $HERDR_PANE_ID is injected per pane, so it is authoritative, and
+#   herdr runs inside a GUI terminal (iTerm2, say). Falling through to iTerm2 is
+#   exactly the bug this rank fixes: AppleScript split the iTerm2 *window*, so
+#   the pane sat outside herdr's tab tree — it stayed on screen when the user
+#   switched herdr tabs, detached from the session it belonged to.
+#   tmux next: $TMUX is set even when tmux runs inside iTerm2/WezTerm, and a GUI
+#   split there would live outside the multiplexer's pane tree (alive/close,
+#   which speak tmux, could never reconcile it).
+#
+# But $TMUX beats the herdr vars, which is why cbm_detect_herdr checks for it.
+# When both are set, the tmux pane is where Claude actually is — either tmux is
+# running inside a herdr pane, or the herdr vars are a GHOST: they are ordinary
+# environment variables, inherited by anything a herdr pane starts and never
+# refreshed, so a tmux *server* first started from a herdr pane hands them to
+# every window opened from it afterwards, including ones attached from a plain
+# terminal with no herdr anywhere. Splitting on that stale $HERDR_PANE_ID puts
+# the monitor in an unrelated pane, or in no pane at all.
+#
+# The nesting this gets wrong is herdr running INSIDE tmux, where tmux would win
+# and the herdr pane would go unsplit; CBM_BACKEND=herdr forces it. A pre-set
+# CBM_BACKEND env var forces any backend (handy for tests / overrides); it is
+# assigned, never exported, so a child with a different env re-resolves.
 cbm_backend() {
   if [ -n "${CBM_BACKEND:-}" ]; then printf '%s' "$CBM_BACKEND"; return 0; fi
   local b
-  for b in tmux wezterm iterm; do
+  for b in herdr tmux wezterm iterm; do
     if "cbm_detect_$b"; then CBM_BACKEND="$b"; printf '%s' "$b"; return 0; fi
   done
   return 1
@@ -343,7 +365,7 @@ cbm_state_backend() {  # $1=path -> backend id (legacy single-line => iterm)
   first="$(sed -n 1p "$1" 2>/dev/null)"
   second="$(sed -n 2p "$1" 2>/dev/null)"
   case "$first" in
-    tmux|wezterm|iterm) [ -n "$second" ] && { printf '%s' "$first"; return; } ;;
+    herdr|tmux|wezterm|iterm) [ -n "$second" ] && { printf '%s' "$first"; return; } ;;
   esac
   printf 'iterm'
 }
@@ -352,7 +374,7 @@ cbm_state_handle() {  # $1=path -> opaque handle
   first="$(sed -n 1p "$1" 2>/dev/null)"
   second="$(sed -n 2p "$1" 2>/dev/null)"
   case "$first" in
-    tmux|wezterm|iterm) [ -n "$second" ] && { printf '%s' "$second"; return; } ;;
+    herdr|tmux|wezterm|iterm) [ -n "$second" ] && { printf '%s' "$second"; return; } ;;
   esac
   printf '%s' "$first"   # legacy: the whole single line is the iTerm id
 }
@@ -441,7 +463,9 @@ cbm_open_pane() {  # $1=sid  $2=trans  $3=auto|manual
   # may retire itself on discovering it is following an agent.
   local cmd handle mode="${3:-manual}"
   cmd="$watcher $(cbm_shq "$sid") $(cbm_shq "$trans") $(cbm_shq "$poll") $(cbm_shq "$mode")"
-  handle="$("cbm_open_$backend" "$cmd" "$split" "$size")" || return 1
+  # $4 is the session id, for backends that can label the pane they create (herdr
+  # shows it in its sidebar). The others take three args and ignore it.
+  handle="$("cbm_open_$backend" "$cmd" "$split" "$size" "$sid")" || return 1
   [ -z "$handle" ] && return 1
   # If we can't record the pane, close it again rather than leaking an orphan
   # that SessionEnd (which keys off the state file) could never find.
@@ -450,6 +474,128 @@ cbm_open_pane() {  # $1=sid  $2=trans  $3=auto|manual
     return 1
   fi
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# Backend: herdr  (https://herdr.dev, macOS + Linux). A tmux-like multiplexer for
+# coding agents. Handle = a herdr pane id like w1:p4.
+#
+# Everything here goes through the `herdr` CLI, which prints one JSON object on
+# stdout on success and a JSON error on stderr with exit 1 on failure — so every
+# call is 2>/dev/null and the exit status is the answer.
+#
+# The CLI has no client-side timeout: it talks to the herdr server over a unix
+# socket, and a socket that is bound but wedged blocks the call rather than
+# failing it. No helper guards that here, because it is the same exposure the
+# other three backends already carry (a hung tmux server, `wezterm cli`, or
+# osascript against a beachballed iTerm2 all block the same way).
+# ---------------------------------------------------------------------------
+
+# Where the herdr CLI lives. herdr injects $HERDR_BIN_PATH into every pane it
+# manages, which is the only reliable answer inside a hook (stripped PATH); a
+# bare `herdr` covers anyone who unsets it and has it on PATH anyway.
+cbm_herdr_bin() { printf '%s' "${HERDR_BIN_PATH:-herdr}"; }
+
+# A herdr pane id is "w<id>:p<id>". Handles come off disk, so every entry point
+# validates the shape before passing one to the CLI as an argument — a corrupt
+# state file whose second line is `; rm -rf /` must reach nothing.
+#
+# The two halves are checked as a CHARACTER CLASS, not as numbers: herdr's ids
+# are opaque and only look numeric at first ("do not predict identifiers", says
+# its own guidance) — the tenth pane of a workspace comes back as w1:pA. A
+# digits-only rule passed every early test and would then have rejected every
+# real pane id from the tenth onward. What matters here is that nothing but
+# [A-Za-z0-9_-] gets through, and that the value always begins with `w` so it
+# can never read as an option.
+#
+# Written with `case`, not a bash regex: common.sh is also sourced by a plain
+# /bin/sh in places, and a hard parse error there would take the whole file down.
+cbm_herdr_pane_ok() {  # $1=handle
+  local h="${1:-}" ws pane
+  case "$h" in w*:p*) ;; *) return 1 ;; esac
+  ws="${h%%:*}";  ws="${ws#w}"      # the workspace id, between `w` and the ':'
+  pane="${h#*:}"; pane="${pane#p}"  # the pane id, after the ':p'
+  # Non-empty and unremarkable on both sides, which also rejects a second colon
+  # and any trailing junk ("w1:p4 extra" leaves "4 extra" here).
+  case "$ws"   in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  case "$pane" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+}
+
+# Pull .result.pane.pane_id out of a herdr JSON response without jq or python
+# (neither is guaranteed in hook context). Cut on , { } so each key lands on its
+# own line, then read the first pane_id — the same shape as the WezTerm alive
+# check.
+cbm_herdr_pane_id() {  # $1=json -> pane id or empty
+  printf '%s' "$1" | tr ',{}' '\n\n\n' \
+    | sed -n 's/.*"pane_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+
+cbm_open_herdr() {  # $1=cmd  $2=split  $3=size%  $4=sid  -> prints wN:pN
+  local cmd="$1" dir=right pct="${3:-25}" sid="${4:-}" bin ratio json id
+  [ "$2" = horizontally ] && dir=down
+  # Split from OUR pane, never the focused one: the monitor belongs beside the
+  # session that asked for it, and the user may be looking elsewhere.
+  cbm_herdr_pane_ok "${HERDR_PANE_ID:-}" || return 1
+  bin="$(cbm_herdr_bin)"
+  case "$pct" in ''|*[!0-9]*) pct=25 ;; esac
+  # --ratio is the share kept by the ORIGINAL pane, not the size of the new one:
+  # measured, `--ratio 0.25` left this pane 18 of 70 columns and handed the new
+  # pane 52. CBM_SIZE is the share the MONITOR takes, so pass the complement —
+  # 25% monitor => --ratio 0.75 (measured back as 22 of 89 columns for the new
+  # pane). Two decimals is exact for an integer percentage.
+  #
+  # 10# forces base 10. Without it `CBM_SIZE=08` is an octal literal: bash errors
+  # on the hook's stderr and the arithmetic yields nothing, leaving `--ratio 0.`
+  # — which herdr ACCEPTS, as 0.0, collapsing the session's own pane. (`025`
+  # would quietly mean 21%.) The digits-only `case` above is what makes 10# safe.
+  ratio="0.$(printf '%02d' "$((100 - 10#$pct))")"
+  # The retry is keyed on the split COMMAND failing, never on the answer being
+  # unreadable: a split that succeeded has already put a pane on screen, and
+  # retrying that would put a second one there with nothing pointing at either.
+  # The only thing the fallback drops is --ratio, the one flag a herdr too old
+  # to know it would reject (it then creates no pane at all) — the same shape as
+  # the tmux backend's fallback for `-l N%`, and the pane lands at herdr's
+  # default even split rather than not at all.
+  if json="$("$bin" pane split --pane "$HERDR_PANE_ID" --direction "$dir" \
+                    --ratio "$ratio" --no-focus 2>/dev/null)"; then
+    id="$(cbm_herdr_pane_id "$json")"
+  else
+    json="$("$bin" pane split --pane "$HERDR_PANE_ID" --direction "$dir" \
+                   --no-focus 2>/dev/null)" || return 1
+    id="$(cbm_herdr_pane_id "$json")"
+  fi
+  # A split reported success but we cannot read a pane id out of it: the JSON
+  # shape has changed under us. There is nothing we could name to close, so stop
+  # rather than guess — a wrong id here would close somebody else's pane.
+  cbm_herdr_pane_ok "$id" || return 1
+  # The command is TYPED into the pane's interactive login shell — herdr offers
+  # no argv form on split — so it lands in the user's shell history, and an rc
+  # that consumes stdin before printing a prompt would eat it. `exec` replaces
+  # that shell with the watcher, so the pane dies with it: the pane lifetime the
+  # tmux backend gets for free. $cmd is already single-quoted per argument, and
+  # that login shell is the one and only parser of it. herdr buffers the text
+  # until the prompt is up, so no wait is needed.
+  if ! "$bin" pane run "$id" "exec $cmd" >/dev/null 2>&1; then
+    # Close it: a split we cannot drive is an empty pane the user has to shut by
+    # hand, and no state file would ever point at it.
+    "$bin" pane close "$id" >/dev/null 2>&1
+    return 1
+  fi
+  # Best-effort label for herdr's sidebar, so the pane says what it is and which
+  # session it follows. Never worth failing an open that already succeeded.
+  if [ -n "$sid" ]; then
+    "$bin" pane rename "$id" "ccusage $(printf '%s' "$sid" | cut -c1-8)" \
+      >/dev/null 2>&1 || true
+  fi
+  printf '%s\n' "$id"
+}
+cbm_alive_herdr() {  # $1=handle
+  cbm_herdr_pane_ok "${1:-}" || return 1
+  "$(cbm_herdr_bin)" pane get "$1" >/dev/null 2>&1
+}
+cbm_close_herdr() {  # $1=handle
+  cbm_herdr_pane_ok "${1:-}" || return 0
+  "$(cbm_herdr_bin)" pane close "$1" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------

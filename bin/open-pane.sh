@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SessionStart hook: open a side pane with a live ccusage readout scoped to THIS
-# Claude Code session (tmux, WezTerm, or iTerm2), and remember it so we can close
-# it on exit.
+# Claude Code session (herdr, tmux, WezTerm, or iTerm2), and remember it so we
+# can close it on exit.
 #
 # Config (env vars, all optional):
 #   CBM_POLL   seconds between cheap file-change checks (default 3)
@@ -19,7 +19,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 
 input="$(cat)"
 cbm_fix_path                 # put Homebrew/npm (tmux, wezterm, ccusage) on PATH FIRST
-cbm_is_supported || exit 0   # no-op unless tmux/WezTerm/iTerm2 is active
+cbm_is_supported || exit 0   # no-op unless herdr/tmux/WezTerm/iTerm2 is active
 
 sid="$(printf '%s' "$input"   | cbm_json_field session_id)"
 trans="$(printf '%s' "$input" | cbm_json_field transcript_path)"
