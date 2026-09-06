@@ -5,7 +5,7 @@
     "url": "https://github.com/thekoalaperson"
   },
   "metadata": {
-    "description": "Live side-pane usage monitor for Claude Code (tmux/WezTerm/iTerm2, macOS + Linux) — accurate per-model and subagent costs."
+    "description": "Live side-pane usage monitor for Claude Code (herdr/tmux/WezTerm/iTerm2, macOS + Linux) — accurate per-model and subagent costs."
   },
   "plugins": [
     {

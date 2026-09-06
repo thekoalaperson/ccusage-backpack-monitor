@@ -875,6 +875,350 @@ cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
         self.assertIn("rc=0", out, r.stderr)
 
 
+class TestHerdrBackend(Base):
+    """The herdr backend (lib/common.sh).
+
+    herdr is a multiplexer that runs *inside* a GUI terminal, so before it had a
+    backend detection fell through to iTerm2 and AppleScript split the iTerm2
+    **window**. That pane lived outside herdr's tab tree: it stayed on screen
+    when the user switched herdr tabs, detached from the session it belonged to.
+    So herdr ranks first, and every pane operation speaks its `w1:p4` pane ids.
+
+    Every test runs against a fake `herdr` executable pointed at by
+    $HERDR_BIN_PATH, so the suite never touches a real multiplexer.
+    """
+
+    # Records its argv, answers with the JSON shapes herdr 0.8.2 really returns
+    # (result on stdout; a JSON error on stderr with exit 1).
+    FAKE = r'''#!/bin/sh
+echo "$*" >> "%(log)s"
+case "$1 $2" in
+  "pane split")
+    [ -n "${FAKE_SPLIT_FAILS:-}" ] && { echo '{"error":{"code":"bad"}}' >&2; exit 1; }
+    # A success whose shape we do not recognise: the pane EXISTS on screen.
+    [ -n "${FAKE_SPLIT_NO_ID:-}" ] && { echo '{"id":"cli:pane:split","result":{"type":"ok"}}'; exit 0; }
+    echo '{"id":"cli:pane:split","result":{"pane":{"agent_status":"unknown","pane_id":"'"${FAKE_PANE_ID:-w1:p4}"'","tab_id":"w1:t1","workspace_id":"w1"},"type":"pane_info"}}'
+    ;;
+  "pane run")
+    [ -n "${FAKE_RUN_FAILS:-}" ] && { echo '{"error":{"code":"bad"}}' >&2; exit 1; }
+    echo '{"id":"cli:pane:run","result":{"type":"ok"}}'
+    ;;
+  "pane get")
+    # Alive = listed in $FAKE_ALIVE (default: just w1:p4) and not closed since.
+    grep -qxF "$3" "%(dead)s" 2>/dev/null && { echo '{"error":{"code":"pane_not_found"}}' >&2; exit 1; }
+    case " ${FAKE_ALIVE-w1:p4} " in
+      *" $3 "*) ;;
+      *) echo '{"error":{"code":"pane_not_found"}}' >&2; exit 1 ;;
+    esac
+    echo '{"id":"cli:pane:get","result":{"pane":{"pane_id":"'"$3"'"},"type":"pane_info"}}'
+    ;;
+  "pane close")
+    # FAKE_CLOSE_STICKS: the close reports success and the pane stays anyway.
+    [ -n "${FAKE_CLOSE_STICKS:-}" ] || echo "$3" >> "%(dead)s"
+    echo '{"id":"cli:pane:close","result":{"type":"ok"}}'
+    ;;
+  *) echo '{"result":{"type":"ok"}}' ;;
+esac
+exit 0
+'''
+
+    def setUp(self):
+        super().setUp()
+        self.log = os.path.join(self.tmp, "herdr.log")
+        self.dead = os.path.join(self.tmp, "herdr.dead")
+        self.fake = os.path.join(self.tmp, "fake-herdr")
+        with open(self.fake, "w") as f:
+            f.write(self.FAKE % {"log": self.log, "dead": self.dead})
+        os.chmod(self.fake, 0o755)
+
+    def _sh(self, body, **overrides):
+        """Run <body> with common.sh sourced and a controlled terminal env.
+
+        The suite itself may well be running inside herdr/tmux/iTerm2, so every
+        detector's env var is set explicitly here rather than inherited.
+        """
+        e = dict(os.environ)
+        for v in ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_BIN_PATH", "TMUX",
+                  "TMUX_PANE", "WEZTERM_PANE", "TERM_PROGRAM",
+                  "ITERM_SESSION_ID", "CBM_BACKEND"):
+            e.pop(v, None)
+        e["XDG_STATE_HOME"] = os.path.join(self.tmp, "state")
+        e["HERDR_BIN_PATH"] = self.fake
+        for k, v in overrides.items():
+            if v is None:
+                e.pop(k, None)
+            else:
+                e[k] = v
+        script = '. "%s/common.sh"\n%s' % (os.path.abspath(LIB), body)
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e)
+        return r.stdout.strip(), r
+
+    def _log(self):
+        if not os.path.exists(self.log):
+            return ""
+        with open(self.log) as f:
+            return f.read()
+
+    def _calls(self, prefix):
+        """How many times the fake CLI was asked to do <prefix>."""
+        return len([l for l in self._log().splitlines() if l.startswith(prefix)])
+
+    # -- detection ----------------------------------------------------------
+
+    def test_herdr_outranks_the_terminal_it_runs_inside(self):
+        """The whole bug: herdr inside iTerm2 is still herdr, not iTerm2."""
+        out, r = self._sh('cbm_backend; echo',
+                          HERDR_ENV="1", HERDR_PANE_ID="w1:p1",
+                          TERM_PROGRAM="iTerm.app")
+        self.assertEqual(out, "herdr", r.stderr)
+
+    def test_tmux_outranks_a_herdr_variable_that_may_be_a_ghost(self):
+        """$HERDR_PANE_ID is an ordinary environment variable, so it is inherited
+        by anything a herdr pane starts and never refreshed. A tmux *server*
+        first launched from a herdr pane hands it to every window opened from it
+        afterwards — including ones attached from a plain terminal with no herdr
+        in sight, where splitting on that stale id lands the monitor in an
+        unrelated pane. With both set, the tmux pane is where Claude is.
+        """
+        out, r = self._sh('cbm_backend; echo',
+                          HERDR_ENV="1", HERDR_PANE_ID="w1:p1",
+                          TMUX="/x", TERM_PROGRAM="iTerm.app")
+        self.assertEqual(out, "tmux", r.stderr)
+
+    def test_herdr_inside_tmux_is_the_nesting_you_must_force(self):
+        out, r = self._sh('cbm_backend; echo',
+                          CBM_BACKEND="herdr", HERDR_ENV="1",
+                          HERDR_PANE_ID="w1:p1", TMUX="/x")
+        self.assertEqual(out, "herdr", r.stderr)
+
+    def test_without_a_pane_id_herdr_is_not_claimed(self):
+        """HERDR_PANE_ID is what makes the answer authoritative — it is injected
+        per pane. Without one there is nothing to split from."""
+        out, r = self._sh('cbm_backend; echo',
+                          HERDR_ENV="1", HERDR_PANE_ID=None, TMUX="/x")
+        self.assertEqual(out, "tmux", r.stderr)
+
+    def test_cbm_backend_override_still_wins(self):
+        """Someone running tmux inside a herdr pane wants the tmux split."""
+        out, r = self._sh('cbm_backend; echo',
+                          CBM_BACKEND="tmux", HERDR_ENV="1",
+                          HERDR_PANE_ID="w1:p1", TMUX="/x")
+        self.assertEqual(out, "tmux", r.stderr)
+
+    # -- state file ---------------------------------------------------------
+
+    def test_a_herdr_state_file_round_trips(self):
+        """The regression trap: an unknown backend tag is read as a *legacy*
+        single-line iTerm record, so a herdr pane would have been closed by
+        AppleScript with the handle 'herdr'."""
+        out, r = self._sh(r'''
+f="$(cbm_state_dir)/s.pane"
+printf 'herdr\nw1:p4\n/root\n123\n' > "$f"
+echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
+''')
+        self.assertIn("be=herdr h=w1:p4", out, r.stderr)
+
+    # -- open ---------------------------------------------------------------
+
+    def test_open_splits_runs_and_labels(self):
+        out, r = self._sh('cbm_open_herdr "/bin/watch.sh a b" vertically 25 abcd1234ef',
+                          HERDR_ENV="1", HERDR_PANE_ID="w1:p1")
+        self.assertEqual(out, "w1:p4", r.stderr)
+        log = self._log().splitlines()
+        self.assertEqual(len(log), 3, log)
+        self.assertIn("pane split", log[0])
+        self.assertIn("--pane w1:p1", log[0])
+        self.assertIn("--direction right", log[0])
+        self.assertIn("--no-focus", log[0])
+        # 25% for the monitor => the ORIGINAL pane keeps 0.75 (measured: --ratio
+        # 0.25 left the original 18 of 70 columns, not the new pane).
+        self.assertIn("--ratio 0.75", log[0])
+        # exec: the watcher becomes the pane's process, so the pane closes with it
+        self.assertIn("pane run w1:p4 exec /bin/watch.sh a b", log[1])
+        self.assertIn("pane rename w1:p4 ccusage abcd1234", log[2])
+
+    def test_horizontal_split_maps_to_down(self):
+        out, r = self._sh('cbm_open_herdr "cmd" horizontally 40 sid',
+                          HERDR_ENV="1", HERDR_PANE_ID="w1:p1")
+        self.assertEqual(out, "w1:p4", r.stderr)
+        self.assertIn("--direction down", self._log())
+        self.assertIn("--ratio 0.60", self._log())
+
+    def test_a_pane_that_cannot_be_driven_is_closed_again(self):
+        """Never leak an empty pane: nothing would record it, so nothing could
+        ever close it."""
+        out, r = self._sh('cbm_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
+                          HERDR_ENV="1", HERDR_PANE_ID="w1:p1", FAKE_RUN_FAILS="1")
+        self.assertIn("rc=1", out, r.stderr)
+        self.assertIn("pane close w1:p4", self._log())
+
+    def test_a_failed_split_opens_nothing(self):
+        out, r = self._sh('cbm_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
+                          HERDR_ENV="1", HERDR_PANE_ID="w1:p1", FAKE_SPLIT_FAILS="1")
+        self.assertIn("rc=1", out, r.stderr)
+        self.assertNotIn("pane run", self._log())
+
+    # -- alive / close ------------------------------------------------------
+
+    def test_alive_is_the_cli_exit_status(self):
+        out, r = self._sh('''
+cbm_alive_herdr w1:p4;  echo "live=$?"
+cbm_alive_herdr w1:p99; echo "dead=$?"
+''')
+        self.assertIn("live=0", out, r.stderr)
+        self.assertIn("dead=1", out, r.stderr)
+
+    def test_a_bad_handle_never_reaches_the_cli(self):
+        """Handles come off disk. A corrupt state file must not turn into an
+        argument — validate the `w<id>:p<id>` shape first, always."""
+        out, r = self._sh(r'''
+for h in "; rm -rf /" "w1" "" "w1:p4 extra" "w1:x:p4" "-w1:p4" "w1:p4/../x"; do
+  cbm_alive_herdr "$h"; printf 'alive=%s ' "$?"
+  cbm_close_herdr "$h"; printf 'close=%s\n' "$?"
+done
+''')
+        self.assertEqual(out.splitlines(),
+                         ["alive=1 close=0"] * 7, r.stderr)
+        self.assertEqual(self._log(), "", "the CLI was invoked with a bad handle")
+
+    def test_pane_ids_are_not_assumed_to_be_numeric(self):
+        """The tenth pane of a workspace is `w1:pA`, not `w1:p10`.
+
+        herdr's ids are opaque — its own guidance is to read identifiers from
+        responses rather than predict them — and a digits-only handle check
+        passed every early test before rejecting the first real pane id with a
+        letter in it, which stranded the pane it had just created.
+        """
+        out, r = self._sh('''
+cbm_open_herdr "cmd" vertically 25 sid; echo "rc=$?"
+cbm_alive_herdr w1:pA; echo "alive=$?"
+''', HERDR_ENV="1", HERDR_PANE_ID="w1:pA", FAKE_PANE_ID="w2:pB",
+     FAKE_ALIVE="w2:pB w1:pA")
+        self.assertIn("w2:pB", out, r.stderr)
+        self.assertIn("rc=0", out, r.stderr)
+        self.assertIn("alive=0", out, r.stderr)
+        self.assertIn("--pane w1:pA", self._log())
+
+    def test_an_unreadable_answer_does_not_split_a_second_time(self):
+        """The retry is keyed on the split COMMAND failing, never on the answer
+        being unreadable.
+
+        A split that succeeded has already put a pane on screen. Retrying on a
+        response we could not parse put a SECOND one there and closed neither,
+        which is the worst of both: two panes, no monitor, rc=1.
+        """
+        for label, over in (("no pane_id key", {"FAKE_SPLIT_NO_ID": "1"}),
+                            ("unusable id", {"FAKE_PANE_ID": "not a pane id"})):
+            with self.subTest(label):
+                open(self.log, "w").close()
+                out, r = self._sh('cbm_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
+                                  HERDR_ENV="1", HERDR_PANE_ID="w1:p1", **over)
+                self.assertIn("rc=1", out, r.stderr)
+                self.assertEqual(self._calls("pane split"), 1, self._log())
+                self.assertNotIn("pane run", self._log())
+
+    def test_only_a_failed_split_command_is_retried(self):
+        """An older herdr rejects --ratio and creates no pane at all — that is
+        the one case worth a second attempt, and it drops only that flag."""
+        out, r = self._sh('cbm_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
+                          HERDR_ENV="1", HERDR_PANE_ID="w1:p1", FAKE_SPLIT_FAILS="1")
+        self.assertIn("rc=1", out, r.stderr)                 # the fake fails both
+        self.assertEqual(self._calls("pane split"), 2, self._log())
+        splits = [l for l in self._log().splitlines() if "pane split" in l]
+        self.assertIn("--ratio", splits[0])
+        self.assertNotIn("--ratio", splits[1])
+        self.assertIn("--direction right", splits[1])        # only --ratio is dropped
+
+    def test_the_size_percentage_is_read_in_base_ten(self):
+        """`CBM_SIZE=08` is an octal literal to bash: the arithmetic errors onto
+        the hook's stderr and yields nothing, leaving `--ratio 0.` — which herdr
+        ACCEPTS, as 0.0, collapsing the session's own pane. `025` would quietly
+        have meant 21%. Both go through cbm_open_pane's clamp first, so this is
+        the real path, not cbm_open_herdr called by hand.
+        """
+        for size, ratio in (("08", "0.92"), ("025", "0.75"), ("25", "0.75")):
+            with self.subTest(size):
+                open(self.log, "w").close()
+                # A fresh session id each time: the previous pane is still
+                # "alive" to the fake, and cbm_open_pane is idempotent.
+                out, r = self._sh('cbm_open_pane s%s /tmp/t.jsonl auto; echo "rc=$?"' % size,
+                                  HERDR_ENV="1", HERDR_PANE_ID="w1:p1",
+                                  CBM_SIZE=size)
+                self.assertIn("rc=0", out, r.stderr)
+                # Whole flag, not a prefix: the bug produced a bare "0.", which
+                # `assertIn("--ratio 0.")` would happily have accepted.
+                self.assertIn("--ratio %s --no-focus" % ratio, self._log())
+                self.assertEqual(r.stderr, "", "arithmetic noise on stderr")
+
+    def test_the_split_does_not_set_a_cwd(self):
+        """Nothing downstream reads it — watch.sh is invoked by absolute path —
+        and the fallback split must differ from the first by --ratio alone."""
+        out, r = self._sh('cbm_open_herdr "cmd" vertically 25 sid',
+                          HERDR_ENV="1", HERDR_PANE_ID="w1:p1")
+        self.assertEqual(out, "w1:p4", r.stderr)
+        self.assertNotIn("--cwd", self._log())
+
+    def test_close_is_best_effort(self):
+        out, r = self._sh('cbm_close_herdr w1:p4; echo "rc=$?"')
+        self.assertIn("rc=0", out, r.stderr)
+        self.assertIn("pane close w1:p4", self._log())
+
+    # -- end to end ---------------------------------------------------------
+
+    def test_open_pane_records_the_herdr_backend(self):
+        out, r = self._sh(r'''
+cbm_open_pane sess-1 /tmp/t.jsonl auto; echo "rc=$?"
+cat "$(cbm_state_dir)/sess-1.pane"
+''', HERDR_ENV="1", HERDR_PANE_ID="w1:p1")
+        lines = out.splitlines()
+        self.assertIn("rc=0", lines, r.stderr)
+        self.assertEqual(lines[1], "herdr", out)
+        self.assertEqual(lines[2], "w1:p4", out)
+        # The label carries the session id, which only cbm_open_pane knows.
+        self.assertIn("pane rename w1:p4 ccusage sess-1", self._log())
+
+    def test_the_session_end_close_path_speaks_herdr(self):
+        """SessionEnd is a fresh process: it closes via the RECORDED backend.
+
+        This is the whole reason `herdr` had to join the state-file whitelist —
+        an unknown tag is read as a pre-0.6 single-line iTerm record, so this
+        pane would have been hunted for among iTerm2 sessions under the name
+        "herdr" and left on screen forever.
+        """
+        out, r = self._sh(r'''
+f="$(cbm_state_dir)/s.pane"
+printf 'herdr\nw1:p4\n%s\n\n' "$(cbm_plugin_root)" > "$f"
+cbm_close_recorded_pane "$f"; echo "rc=$?"
+[ -f "$f" ] && echo "record=kept" || echo "record=gone"
+''')
+        self.assertIn("rc=0", out, r.stderr)
+        self.assertIn("record=gone", out, r.stderr)
+        calls = [l for l in self._log().splitlines() if l.startswith("pane")]
+        self.assertEqual(calls[0], "pane close w1:p4", calls)
+        self.assertEqual(calls[1], "pane get w1:p4", calls)   # verified, then forgotten
+
+    def test_a_herdr_pane_that_will_not_close_keeps_its_record(self):
+        """Forgetting it first would leave a pane nothing could ever name again."""
+        out, r = self._sh(r'''
+f="$(cbm_state_dir)/s.pane"
+printf 'herdr\nw1:p4\n%s\n\n' "$(cbm_plugin_root)" > "$f"
+cbm_close_recorded_pane "$f"; echo "rc=$?"
+[ -f "$f" ] && echo "record=kept" || echo "record=LOST"
+''', FAKE_CLOSE_STICKS="1")
+        self.assertIn("rc=1", out, r.stderr)
+        self.assertIn("record=kept", out, r.stderr)
+        self.assertEqual(self._calls("pane close"), 2, self._log())   # one retry
+
+    def test_open_pane_records_nothing_when_the_pane_cannot_run(self):
+        out, r = self._sh(r'''
+cbm_open_pane sess-2 /tmp/t.jsonl auto; echo "rc=$?"
+[ -f "$(cbm_state_dir)/sess-2.pane" ] && echo "state=WRITTEN" || echo "state=none"
+''', HERDR_ENV="1", HERDR_PANE_ID="w1:p1", FAKE_RUN_FAILS="1")
+        self.assertIn("rc=1", out, r.stderr)
+        self.assertIn("state=none", out, r.stderr)
+        self.assertIn("pane close w1:p4", self._log())
+
+
 class TestAgentSessionsGetNoPane(Base):
     """Teammates are FULL Claude Code sessions -- their own session id, their own
     transcript, their own SessionStart. Without a guard the monitor opens a pane

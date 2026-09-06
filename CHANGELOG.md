@@ -4,6 +4,42 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-09-06
+
+### Added
+- **[herdr](https://herdr.dev) is a supported terminal.** herdr is a
+  tmux-like multiplexer for coding agents, and it runs *inside* a GUI terminal —
+  which the plugin had no way to know. Detection fell straight through to
+  iTerm2, so the monitor was opened by splitting the **iTerm2 window** itself.
+
+  That pane was never part of herdr's tab tree. It sat over the whole window,
+  stayed on screen when the user switched herdr tabs or workspaces, and went on
+  reporting the session they had just navigated away from — a cost readout
+  physically disconnected from the session it belonged to, and no way to move
+  it.
+
+  There is now a `herdr` backend, and it is detected **first**: `$HERDR_PANE_ID`
+  is injected per pane, so it is authoritative, and whatever owns the layout of
+  the pane Claude runs in is what may split it. The monitor opens as a herdr
+  pane beside the session, moves and closes with its tab, and is labelled
+  `ccusage <session>` in the sidebar so it is identifiable at a glance.
+  `CBM_SIZE` is honoured (the split ratio is converted to the share herdr
+  keeps), and `CBM_SPLIT=horizontally` stacks it below.
+
+  `$TMUX` outranks herdr when both are set. herdr's variables are ordinary
+  environment variables, so a tmux server first started from a herdr pane hands
+  them to every window opened from it afterwards, even ones attached from a
+  plain terminal — and splitting on that stale pane id would drop the monitor
+  into an unrelated pane. When both are set, the tmux pane is where Claude
+  actually is. herdr running *inside* tmux is the nesting this gets wrong;
+  `CBM_BACKEND=herdr` forces it.
+
+  Detection order is now **herdr → tmux → WezTerm → iTerm2**.
+
+- Pane state files record `herdr` as a backend. Without that the tag would have
+  been read as a pre-0.6 single-line iTerm record, and the SessionEnd hook would
+  have gone looking for an iTerm session called `herdr`.
+
 ## [0.11.0] - 2026-08-05
 
 ### Fixed
