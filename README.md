@@ -9,17 +9,17 @@ It reads Claude Code's own transcripts, so it prices **every model** (including
 ones released after this plugin was), counts **subagent and workflow spend**
 against the session that spawned it, and renders in ~0.07s.
 
-It works in **herdr**, **tmux**, **WezTerm**, and **iTerm2**, on **macOS and
-Linux**.
+It works in **herdr**, **tmux**, **Orca**, **WezTerm**, and **iTerm2**, on
+**macOS and Linux**.
 
 <p align="center">
   <img src="assets/hero.png" width="820"
        alt="A live ccusage cost pane — spend, per-model breakdown, burn rate, and a tokens-per-turn sparkline — in a side pane beside a Claude Code session">
 </p>
 
-> **Status:** v0.12.0 — supports herdr (macOS/Linux), tmux (macOS/Linux),
-> WezTerm (macOS/Linux), and iTerm2 (macOS). In any other terminal the hooks
-> no-op silently, so it's safe to install anywhere.
+> **Status:** v0.13.0 — supports herdr (macOS/Linux), tmux (macOS/Linux),
+> Orca (macOS), WezTerm (macOS/Linux), and iTerm2 (macOS). In any other terminal
+> the hooks no-op silently, so it's safe to install anywhere.
 
 ## Why
 
@@ -48,23 +48,30 @@ Three things it gets right that a generic `ccusage session` call does not:
   - **[herdr](https://herdr.dev)** (macOS or Linux) — the pane is a
     `herdr pane split`, inside herdr's own tab.
   - **tmux** (macOS or Linux) — the pane is a `tmux split-window`.
+  - **Orca** (macOS) — the pane is an `orca terminal split`, in the same Orca
+    tab. Orca splits **50/50 only** (it has no size flag), so `CBM_SIZE` is
+    ignored there; the watcher is typed into the new pane with `orca terminal
+    send` rather than passed to the split, because `split --command` proved
+    unreliable (it worked once, then timed out three times out of three, leaving
+    no pane behind); and the pane is never renamed, because renaming a leaf
+    retitles the whole tab.
   - **WezTerm** (macOS or Linux) — the pane is a `wezterm cli split-pane`.
   - **iTerm2** (macOS) — the pane is opened via iTerm2's AppleScript.
 
-  Detection is automatic and ordered **herdr → tmux → WezTerm → iTerm2**: a
-  multiplexer owns the layout of the pane Claude runs in, so splitting the GUI
+  Detection is automatic and ordered **herdr → tmux → Orca → WezTerm → iTerm2**:
+  a multiplexer owns the layout of the pane Claude runs in, so splitting the GUI
   terminal around it would put the monitor outside that layout — over the whole
   window, and still there after you switch tabs. So if you run herdr or tmux
-  inside iTerm2 or WezTerm, the multiplexer's split is used. You can force a
-  choice with `CBM_BACKEND` (see Configuration).
+  inside iTerm2, Orca or WezTerm, the multiplexer's split is used. You can force
+  a choice with `CBM_BACKEND` (see Configuration).
 
-  One exception to the order: `$TMUX` wins over herdr. herdr's variables are
-  ordinary environment variables, so a tmux server first started from a herdr
-  pane keeps handing them to every window opened from it afterwards — including
-  ones attached from a plain terminal, where splitting on that stale pane id
-  would put the monitor somewhere unrelated. When both are set the tmux pane is
-  where Claude actually is. If you run herdr *inside* tmux, set
-  `CBM_BACKEND=herdr`.
+  One exception to the order: `$TMUX` wins over both herdr and Orca. Their pane
+  variables are ordinary environment variables, so a tmux server first started
+  from a herdr or Orca pane keeps handing them to every window opened from it
+  afterwards — including ones attached from a plain terminal, where splitting on
+  that stale pane handle would put the monitor somewhere unrelated. When both are
+  set the tmux pane is where Claude actually is. If you run herdr *inside* tmux,
+  set `CBM_BACKEND=herdr`.
 - **`python3`** — the only real dependency, resolved via your `PATH` (macOS
   ships one at `/usr/bin/python3`; it may prompt to install the Xcode Command
   Line Tools the first time). No pip packages; the standard library is enough.
@@ -77,9 +84,10 @@ Three things it gets right that a generic `ccusage session` call does not:
 
 | Scenario | Behaviour |
 |---|---|
-| herdr / tmux / WezTerm / iTerm2 + python3 | Full rich panel (cost, agents, burn rate, sparkline) |
+| herdr / tmux / Orca / WezTerm / iTerm2 + python3 | Full rich panel (cost, agents, burn rate, sparkline) |
 | Supported terminal, no python3, ccusage present | Plain `ccusage` text fallback, still live |
 | Supported terminal, **neither** | Pane shows the exact, OS-aware fix and becomes a shell so you can run it |
+| **Orca** (macOS) | Full support, except that the split is always 50/50 — `CBM_SIZE` has no effect |
 | herdr, tmux or WezTerm on **Linux** | Full support |
 | Any other terminal (plain Terminal.app, kitty, Ghostty, …) | Hooks **no-op silently** (safe to leave installed) |
 
@@ -100,8 +108,8 @@ Inside Claude Code:
 /plugin install ccusage-backpack-monitor@ccusage-backpack-monitor
 ```
 
-Then start a fresh `claude` in herdr, tmux, WezTerm, or iTerm2 — a side pane opens
-automatically.
+Then start a fresh `claude` in herdr, tmux, Orca, WezTerm, or iTerm2 — a side
+pane opens automatically.
 
 <details>
 <summary>Local development install</summary>
@@ -139,9 +147,11 @@ Set these as environment variables before launching `claude`:
 |----------------------|---------------|------------------------------------------------------|
 | `CBM_POLL`           | `3`           | Seconds between cheap file-change checks              |
 | `CBM_SPLIT`          | `vertically`  | `vertically` (side-by-side) or `horizontally`        |
-| `CBM_SIZE`           | `25`          | Percent of the terminal the monitor pane takes (clamped to 5–90). The main Claude session keeps the rest, so the default is a 3:1 split in Claude's favor. Applies to **all** backends (herdr, tmux, WezTerm, iTerm2). |
-| `CBM_BACKEND`        | _(auto)_      | Force a terminal backend: `herdr`, `tmux`, `wezterm`, or `iterm`. Unset = auto-detect (herdr → tmux → WezTerm → iTerm2). `$TMUX` wins over herdr when both are set, so set this to `herdr` if you run herdr inside tmux. |
+| `CBM_SIZE`           | `25`          | Percent of the terminal the monitor pane takes (clamped to 5–90). The main Claude session keeps the rest, so the default is a 3:1 split in Claude's favor. Applies to herdr, tmux, WezTerm and iTerm2. **Ignored on Orca**, which has no size flag and always splits 50/50. |
+| `CBM_BACKEND`        | _(auto)_      | Force a terminal backend: `herdr`, `tmux`, `orca`, `wezterm`, or `iterm`. Unset = auto-detect (herdr → tmux → Orca → WezTerm → iTerm2). `$TMUX` wins over herdr and Orca when both are set, so set this to `herdr` if you run herdr inside tmux. |
 | `CBM_WEZTERM_PERCENT`| `CBM_SIZE`    | WezTerm-only override for the split size (percent of the source pane). Unset, it inherits `CBM_SIZE`. |
+| `CBM_ORCA_BIN`       | _(auto)_      | Path to the `orca` CLI. Unset, the app bundle's copy is used (`/Applications/Orca.app/Contents/Resources/bin/orca`), falling back to `orca` on `PATH` — the bundle first, because the `/usr/local/bin` symlink can be broken. |
+| `CBM_ORCA_REFOCUS`   | `1`           | Orca only: after splitting, focus is handed back to the pane Claude is in, so you keep typing where you were. `0` skips that and leaves the new monitor pane active. |
 | `CBM_BLOCKS`         | `1`           | `0` hides the 5h burn-rate/projection section        |
 | `CBM_TABS`           | `1`           | `0` disables the tab strip and arrow-key navigation — a single static panel |
 | `CBM_LIMITS`         | `1`           | `0` hides the account rate-limit meters (5h / weekly) |
@@ -288,8 +298,9 @@ never re-read.
 
 **Backends.** All terminal-specific logic lives in `lib/common.sh` as small
 per-backend functions — `cbm_{detect,open,alive,close}_<backend>`. A cached
-`cbm_backend()` picks the active one (herdr → tmux → WezTerm → iTerm2). Adding a new
-terminal (kitty, Ghostty, …) is four functions plus one word in that list.
+`cbm_backend()` picks the active one (herdr → tmux → Orca → WezTerm → iTerm2).
+Adding a new terminal (kitty, Ghostty, …) is four functions plus one word in that
+list.
 
 State (one tiny `<session-id>.pane` file per session) lives in
 `~/.local/state/ccusage-backpack-monitor` and self-prunes after a day. It records
@@ -304,7 +315,7 @@ command must agree on it, so the close hook can find a pane the command opened.)
 python3 tests/test_usage.py
 ```
 
-145 fixture-based regression tests covering pricing resolution, deduplication,
+175 fixture-based regression tests covering pricing resolution, deduplication,
 subagent attribution, 5h block math, context-window handling, session
 resolution (agents are never mistaken for sessions), the open/close/restart
 toggle, the terminal backends (against a stand-in CLI, so no real panes are
@@ -314,7 +325,8 @@ usage data and never touch the network.
 
 ## Roadmap
 
-- More terminals: kitty, Ghostty (herdr, tmux, WezTerm, and iTerm2 are supported)
+- More terminals: kitty, Ghostty (herdr, tmux, Orca, WezTerm, and iTerm2 are
+  supported)
 - A companion skill/command for on-demand usage summaries
 - Optional context-window % in the panel
 

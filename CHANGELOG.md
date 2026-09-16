@@ -4,6 +4,86 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] - 2026-09-16
+
+### Added
+- **Orca is a supported terminal.** Orca sets
+  `$TERM_PROGRAM=Orca`, which matched no backend at all: detection fell through
+  every rank and returned nothing, so the SessionStart hook quietly did nothing
+  and an Orca session simply never got a monitor.
+
+  There is now an `orca` backend, detected from `$ORCA_TERMINAL_HANDLE` — the
+  `term_<uuid>` handle Orca injects per pane, which is authoritative the same way
+  `$HERDR_PANE_ID` is. The monitor opens as an Orca split beside the session and
+  closes with it. Detection order is now **herdr → tmux → Orca → WezTerm →
+  iTerm2**, and `$TMUX` outranks Orca for the reason it already outranks herdr:
+  the handle is an ordinary environment variable, so a tmux server first started
+  from an Orca pane keeps handing it to every window opened from it afterwards.
+
+  It was built against measurements of Orca 1.4.199 rather than its help text,
+  and three of those measurements changed the design:
+
+  - **The split is always 50/50.** There is no size, ratio or percent flag, so
+    `CBM_SIZE` cannot be honoured on Orca. It is accepted and ignored there
+    (every other backend still applies it), and this is now documented rather
+    than silently untrue.
+  - **`split --command` is unreliable.** It worked once and then failed three
+    times out of three with "Timed out waiting for split pane handle", after a
+    ten-second hang, creating no pane. A bare split succeeded every time, so the
+    watcher is typed into the new pane with `terminal send` instead. The pane is
+    also never renamed: `terminal rename` retitles the enclosing tab as well as
+    the leaf, which would rename the user's own tab.
+  - **A closed pane reports success.** `terminal show` on a pane that is already
+    gone still returns `ok: true` and exit 0, saying `"connected": false`. So
+    liveness reads the field, never the exit status — which matters far more than
+    it sounds, because of the next point.
+
+  **The close guard.** Asking Orca 1.4.199 to close a handle whose pane has
+  already left the tab layout closes a *different* pane in that tab. Measured
+  twice, and both times the pane it killed was the one running the Claude Code
+  session that had created the split. That case is not exotic: it is exactly what
+  a monitor retiring itself looks like, since a watcher that exits makes Orca drop
+  its pane from the layout on its own. So `cbm_close_orca` asks `terminal show`
+  first and issues `terminal close` only for a pane reporting `connected: true`;
+  a pane that is already gone is left alone entirely. `--tab` and `--all` are
+  never used, and the close retry at session teardown re-checks liveness before
+  each attempt rather than once at the start.
+
+  That guard is what makes **retirement** work rather than misfire. A monitor
+  whose watcher exits — because the session it follows has ended — is dropped
+  from the tab by Orca itself; `terminal show` then reports
+  `"connected": false` with an `exitCause` of kind `"unknown"`. The recorded
+  handle is never handed to `terminal close` in that state, the state file is
+  cleaned up on the strength of `show` alone, and the next
+  `/ccusage-monitor` opens a fresh pane instead of reaching for the old one.
+
+  Handles are validated against the exact `term_` + 8-4-4-4-12 lowercase-hex
+  shape at every entry point, so nothing off disk — a corrupt state file, a
+  handle with a trailing newline — can reach the CLI as an argument.
+
+- Pane state files record `orca` as a backend. Without that the tag would have
+  been read as a pre-0.6 single-line iTerm record, and the SessionEnd hook would
+  have gone looking for an iTerm session called `orca`.
+
+- `CBM_ORCA_BIN` overrides the path to the `orca` CLI. The bundled CLI at
+  `/Applications/Orca.app/Contents/Resources/bin/orca` is preferred over `PATH`,
+  because the `/usr/local/bin` symlink is broken on at least one install and
+  fails every call.
+
+- After the split, focus is handed back to Claude's own pane. Orca's new pane
+  takes focus and there is no `--no-focus`, so the monitor would otherwise open
+  with the cursor in it. Measured on 1.4.199: `terminal focus` re-activates the
+  original *leaf*, not merely the tab, so the user carries on typing where they
+  were. The call is best-effort and never fails an open. `CBM_ORCA_REFOCUS=0`
+  skips it and leaves the monitor pane active.
+
+### Fixed
+- **A plugin root containing a space or a glob character broke the pane's exec
+  line.** Every argument passed to the watcher was quoted, but the path to the
+  watcher itself was not — so an install under a directory with a space in it
+  ran the wrong command with the remainder as arguments. It is now quoted like
+  the rest. Affects every backend.
+
 ## [0.12.0] - 2026-09-06
 
 ### Added

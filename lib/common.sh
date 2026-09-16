@@ -3,8 +3,8 @@
 # Sourced (by bash) from bin/open-pane.sh, bin/close-pane.sh, bin/open-now.sh,
 # and bin/watch.sh.
 #
-# Terminal support is pluggable. Each "backend" (herdr, iterm, tmux, wezterm)
-# implements four operations as plain functions named cbm_<op>_<backend>:
+# Terminal support is pluggable. Each "backend" (herdr, iterm, orca, tmux,
+# wezterm) implements four operations as plain functions named cbm_<op>_<backend>:
 #     cbm_detect_<be>   -> 0 if this terminal is active
 #     cbm_open_<be>     <cmd> <split>  -> prints an opaque pane handle on stdout
 #     cbm_alive_<be>    <handle>       -> 0 if that pane is still open
@@ -201,9 +201,11 @@ EOF
 # clearly inside. Whether the CLI is actually runnable is handled at open time
 # (cbm_fix_path first, then a graceful return 1 if the split command fails).
 # Vars are read with ${VAR:-} so the detectors are safe even under `set -u`.
-# $TMUX disqualifies herdr: see cbm_backend for why a herdr var can be a ghost.
+# $TMUX disqualifies herdr and orca alike: see cbm_backend for why either app's
+# variables can be a ghost inherited by a tmux server started from one of its panes.
 cbm_detect_herdr()   { [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] && [ -z "${TMUX:-}" ]; }
 cbm_detect_tmux()    { [ -n "${TMUX:-}" ]; }
+cbm_detect_orca()    { [ "${TERM_PROGRAM:-}" = Orca ] && [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && [ -z "${TMUX:-}" ]; }
 cbm_detect_wezterm() { [ -n "${WEZTERM_PANE:-}" ] || [ "${TERM_PROGRAM:-}" = "WezTerm" ]; }
 cbm_detect_iterm()   { [ "${TERM_PROGRAM:-}" = "iTerm.app" ] || [ -n "${ITERM_SESSION_ID:-}" ]; }
 
@@ -239,10 +241,20 @@ cbm_is_iterm() { cbm_detect_iterm; }
 # and the herdr pane would go unsplit; CBM_BACKEND=herdr forces it. A pre-set
 # CBM_BACKEND env var forces any backend (handy for tests / overrides); it is
 # assigned, never exported, so a child with a different env re-resolves.
+#
+#   orca ranks BELOW herdr and tmux for exactly the reason above: Orca is a GUI
+#   terminal, so a herdr or tmux running inside an Orca pane owns the inner
+#   layout and must do the splitting — an Orca split around them would sit
+#   outside their pane tree. $ORCA_TERMINAL_HANDLE leaks into a tmux server first
+#   started from an Orca pane the same way the herdr vars do (it is an ordinary
+#   inherited variable, never refreshed), so cbm_detect_orca carries the same
+#   $TMUX disqualifier. It ranks above wezterm/iterm only in the sense of coming
+#   first in this list: inside Orca, $TERM_PROGRAM is Orca, so neither of those
+#   detectors would match anyway.
 cbm_backend() {
   if [ -n "${CBM_BACKEND:-}" ]; then printf '%s' "$CBM_BACKEND"; return 0; fi
   local b
-  for b in herdr tmux wezterm iterm; do
+  for b in herdr tmux orca wezterm iterm; do
     if "cbm_detect_$b"; then CBM_BACKEND="$b"; printf '%s' "$b"; return 0; fi
   done
   return 1
@@ -365,7 +377,7 @@ cbm_state_backend() {  # $1=path -> backend id (legacy single-line => iterm)
   first="$(sed -n 1p "$1" 2>/dev/null)"
   second="$(sed -n 2p "$1" 2>/dev/null)"
   case "$first" in
-    herdr|tmux|wezterm|iterm) [ -n "$second" ] && { printf '%s' "$first"; return; } ;;
+    herdr|tmux|orca|wezterm|iterm) [ -n "$second" ] && { printf '%s' "$first"; return; } ;;
   esac
   printf 'iterm'
 }
@@ -374,7 +386,7 @@ cbm_state_handle() {  # $1=path -> opaque handle
   first="$(sed -n 1p "$1" 2>/dev/null)"
   second="$(sed -n 2p "$1" 2>/dev/null)"
   case "$first" in
-    herdr|tmux|wezterm|iterm) [ -n "$second" ] && { printf '%s' "$second"; return; } ;;
+    herdr|tmux|orca|wezterm|iterm) [ -n "$second" ] && { printf '%s' "$second"; return; } ;;
   esac
   printf '%s' "$first"   # legacy: the whole single line is the iTerm id
 }
@@ -462,7 +474,11 @@ cbm_open_pane() {  # $1=sid  $2=trans  $3=auto|manual
   # the SessionStart hook or deliberately by the user. Only an auto-opened pane
   # may retire itself on discovering it is following an agent.
   local cmd handle mode="${3:-manual}"
-  cmd="$watcher $(cbm_shq "$sid") $(cbm_shq "$trans") $(cbm_shq "$poll") $(cbm_shq "$mode")"
+  # The watcher PATH is quoted like every argument after it. It is derived from
+  # the plugin's own location, which under a marketplace cache or a local
+  # checkout can contain spaces or glob characters — unquoted, those either split
+  # the exec line into a wrong command or expand against the pane's cwd.
+  cmd="$(cbm_shq "$watcher") $(cbm_shq "$sid") $(cbm_shq "$trans") $(cbm_shq "$poll") $(cbm_shq "$mode")"
   # $4 is the session id, for backends that can label the pane they create (herdr
   # shows it in its sidebar). The others take three args and ignore it.
   handle="$("cbm_open_$backend" "$cmd" "$split" "$size" "$sid")" || return 1
@@ -596,6 +612,151 @@ cbm_alive_herdr() {  # $1=handle
 cbm_close_herdr() {  # $1=handle
   cbm_herdr_pane_ok "${1:-}" || return 0
   "$(cbm_herdr_bin)" pane close "$1" >/dev/null 2>&1 || true
+}
+
+# ---------------------------------------------------------------------------
+# Backend: Orca  (macOS). A GUI terminal built around coding agents; it injects
+# $ORCA_TERMINAL_HANDLE into every pane, and that handle IS the pane id here:
+# `term_` followed by a lowercase-hex uuid.
+#
+# Everything goes through the `orca` CLI with --json, which prints
+# {"ok": true, "result": {...}} on success and {"ok": false, "error": {...}} with
+# exit 1 on failure — pretty-printed, one key per line. Measured against Orca
+# 1.4.199; three of its behaviours shape this backend:
+#
+#   * The split is ALWAYS 50/50. There is no size, ratio or percent flag, so
+#     CBM_SIZE cannot be honoured here (accepted and ignored; documented).
+#   * `split --command` is unreliable: it worked once and then failed three times
+#     out of three with "Timed out waiting for split pane handle" after a 10s
+#     hang, creating no pane. So the split is BARE and the watcher is typed in
+#     afterwards with `terminal send`.
+#   * `terminal show` exits 0 for a pane that is closed, so liveness is the
+#     "connected" field, never the exit status. See cbm_close_orca for why that
+#     distinction is load-bearing rather than cosmetic.
+#
+# The pane is never renamed or labelled: `terminal rename` retitles the enclosing
+# TAB as well as the leaf, which would rename the user's own tab.
+# ---------------------------------------------------------------------------
+
+# Where the orca CLI lives. The app bundle path comes FIRST because the PATH
+# copy can be broken: /usr/local/bin/orca is a dangling symlink on at least one
+# install, and it fails loudly ("Unable to determine Orca.app path from symlink")
+# rather than silently, which would take every pane operation down with it.
+# $CBM_ORCA_BIN overrides both, for a non-standard install (and for the tests).
+cbm_orca_bin() {
+  if [ -n "${CBM_ORCA_BIN:-}" ]; then printf '%s' "$CBM_ORCA_BIN"; return 0; fi
+  if [ -x /Applications/Orca.app/Contents/Resources/bin/orca ]; then
+    printf '%s' /Applications/Orca.app/Contents/Resources/bin/orca; return 0
+  fi
+  printf 'orca'
+}
+
+# An Orca terminal handle is `term_` + an 8-4-4-4-12 lowercase-hex uuid, exactly.
+# Handles come off disk (and out of JSON), so every entry point validates the
+# shape before passing one to the CLI as an argument — a corrupt state file whose
+# second line is `; rm -rf /` must reach nothing, and neither must a handle with
+# a trailing newline glued to it.
+#
+# The pattern is spelled out character class by character class, so the length of
+# every group is enforced and the match is anchored at both ends. Written with
+# `case`, not a bash regex: common.sh is also sourced by a plain /bin/sh in
+# places, where a regex would be a hard parse error taking the whole file down.
+cbm_orca_handle_ok() {  # $1=handle
+  local h="${1:-}" x='[0-9a-f]' x4 x8 x12
+  x4="$x$x$x$x"; x8="$x4$x4"; x12="$x8$x4"
+  case "$h" in
+    term_$x8-$x4-$x4-$x4-$x12) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Read one string field out of an orca JSON response on stdin, without jq or
+# python (neither is guaranteed in hook context). Orca pretty-prints one key per
+# line, so a plain sed would do — but the `tr` first means a compact
+# {"handle":"term_..."} body parses identically, which is what the WezTerm and
+# herdr readers already do.
+cbm_orca_json_field() {  # $1=key  (JSON on stdin) -> first value or empty
+  tr ',{}' '\n\n\n' \
+    | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+
+cbm_open_orca() {  # $1=cmd  $2=split  $3=size% (ignored)  -> prints term_<uuid>
+  local cmd="$1" dir=vertical bin json id
+  [ "$2" = horizontally ] && dir=horizontal
+  # Split from OUR pane, never the focused one: the monitor belongs beside the
+  # session that asked for it, and the user may be looking elsewhere.
+  cbm_orca_handle_ok "${ORCA_TERMINAL_HANDLE:-}" || return 1
+  bin="$(cbm_orca_bin)"
+  # No --command (see the header): a bare split is the only reliable one. No size
+  # flag exists, so $3 is accepted and ignored — Orca always splits 50/50.
+  # The exit status is taken from the split ITSELF, not from a pipeline ending in
+  # the parser: a failed split creates no pane, and that has to be told apart
+  # from a pane that exists but whose handle we could not read.
+  json="$("$bin" terminal split --terminal "$ORCA_TERMINAL_HANDLE" \
+                 --direction "$dir" --json 2>/dev/null)" || return 1
+  id="$(printf '%s' "$json" | cbm_orca_json_field handle)"
+  # A split that reported success has already put a pane on screen, so there is
+  # no retry here: a second attempt would leave two panes with nothing pointing
+  # at either. If the handle is unreadable we cannot name what we just created,
+  # so we cannot close it either — stop rather than guess, because a wrong handle
+  # passed to `terminal close` closes somebody else's pane (again, see below).
+  cbm_orca_handle_ok "$id" || return 1
+  # And it must not be OUR OWN handle. Today the first "handle" in a split answer
+  # is the new leaf's, but if that shape ever drifts — or an error path echoes the
+  # parent back — the `send` below would exec the watcher over the pane running
+  # Claude itself, replacing the session with its own monitor. A well-formed
+  # handle is not enough; it has to be a different one.
+  [ "$id" = "$ORCA_TERMINAL_HANDLE" ] && return 1
+  # The command is TYPED into the new pane's interactive login zsh — Orca offers
+  # no reliable argv form — so it lands in the user's shell history. `exec`
+  # replaces that shell with the watcher, so the pane dies with it, and a watcher
+  # that later retires itself makes Orca drop the pane from the layout by itself.
+  # $cmd is already single-quoted per argument and that zsh is its one and only
+  # parser: measured, the text arrives verbatim through exactly one parse layer.
+  #
+  # The one thing NOT measured on Orca is the race: the split's shell is still
+  # sourcing .zshenv/.zprofile/.zshrc when this runs. Typeahead written to a pty
+  # is buffered by the tty discipline and delivered once the shell reads, so this
+  # is expected to be safe (and herdr, where it WAS measured, buffers it), but an
+  # rc file that consumes stdin itself would eat the line. Live-tested separately.
+  if ! "$bin" terminal send --terminal "$id" --text "exec $cmd" --enter --json \
+       >/dev/null 2>&1; then
+    # A split we cannot drive is an empty pane the user has to shut by hand, and
+    # no state file would ever point at it.
+    cbm_close_orca "$id"
+    return 1
+  fi
+  # The new pane steals focus (Orca has no --no-focus), so hand it back. Measured
+  # on 1.4.199: `terminal focus --terminal <parent>` re-activates the original
+  # LEAF, not merely the tab, so the user keeps typing into Claude. Still
+  # best-effort — never worth failing an open that already succeeded — and it
+  # only ever names the pane Claude itself is in. CBM_ORCA_REFOCUS=0 skips the
+  # call, which leaves the new monitor pane active.
+  if [ "${CBM_ORCA_REFOCUS:-1}" != 0 ]; then
+    "$bin" terminal focus --terminal "$ORCA_TERMINAL_HANDLE" --json \
+      >/dev/null 2>&1 || true
+  fi
+  printf '%s\n' "$id"
+}
+cbm_alive_orca() {  # $1=handle
+  cbm_orca_handle_ok "${1:-}" || return 1
+  # The EXIT STATUS is not the answer: `terminal show` on a pane that has been
+  # closed still returns ok:true and exit 0, reporting "connected": false and
+  # "paneRuntimeId": -1. Only a bogus handle is an error. So read the field.
+  "$(cbm_orca_bin)" terminal show --terminal "$1" --json 2>/dev/null \
+    | grep -q '"connected": *true'
+}
+cbm_close_orca() {  # $1=handle
+  cbm_orca_handle_ok "${1:-}" || return 0
+  # *** The most important line in this backend. ***
+  # Asking Orca 1.4.199 to close a handle whose pane has ALREADY left the tab
+  # layout closes a DIFFERENT pane in the same tab. Measured twice, and both
+  # times the pane it killed was the one running the Claude Code session that had
+  # created the split. A pane that closed a moment ago, or whose shell exited on
+  # its own (which is how this monitor retires itself), is exactly that case.
+  # So: already gone => do nothing at all. Never --tab, never --worktree --all.
+  cbm_alive_orca "$1" || return 0
+  "$(cbm_orca_bin)" terminal close --terminal "$1" --json >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
