@@ -940,7 +940,7 @@ exit 0
         e = dict(os.environ)
         for v in ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_BIN_PATH", "TMUX",
                   "TMUX_PANE", "WEZTERM_PANE", "TERM_PROGRAM",
-                  "ITERM_SESSION_ID", "CBM_BACKEND"):
+                  "ORCA_TERMINAL_HANDLE", "ITERM_SESSION_ID", "CBM_BACKEND"):
             e.pop(v, None)
         e["XDG_STATE_HOME"] = os.path.join(self.tmp, "state")
         e["HERDR_BIN_PATH"] = self.fake
@@ -1217,6 +1217,509 @@ cbm_open_pane sess-2 /tmp/t.jsonl auto; echo "rc=$?"
         self.assertIn("rc=1", out, r.stderr)
         self.assertIn("state=none", out, r.stderr)
         self.assertIn("pane close w1:p4", self._log())
+
+
+class TestOrcaBackend(Base):
+    """The Orca backend (lib/common.sh).
+
+    Orca is a GUI terminal for coding agents. It sets $TERM_PROGRAM=Orca, which
+    matched no backend at all, so an Orca session simply got no monitor. Its
+    handles are `term_<uuid>` and every operation goes through the `orca` CLI.
+
+    Three measured behaviours of Orca 1.4.199 drive the whole design, and each
+    has a test below: the split is always 50/50 with no size flag, `--command` is
+    unreliable — it worked once, then timed out three times out of three and left
+    no pane behind, so the watcher is `send`-ed instead — and `terminal show`
+    exits 0 for a pane that is already closed, which matters because closing a
+    handle that has left the layout closes a DIFFERENT pane.
+
+    Every test runs against a fake `orca` executable pointed at by $CBM_ORCA_BIN,
+    so the suite never drives the real app.
+    """
+
+    H = "term_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"   # the pane Claude is in
+    NEW = "term_11112222-3333-4444-5555-666677778888"  # the pane a split creates
+
+    # Records its argv, answers with the JSON shapes Orca 1.4.199 really returns:
+    # pretty-printed, one key per line, `"key": value` with a single space after
+    # the colon. Success is {"ok": true, ...}; failure is {"ok": false, ...} on
+    # stdout with exit 1.
+    FAKE = r'''#!/bin/sh
+# Log argv with each word BRACKETED, so a test can tell one argument containing
+# spaces from several arguments. `echo "$*"` cannot: it renders
+# --text 'exec a b' and --text exec a b identically, which is exactly the
+# distinction that decides whether the watcher command survives the trip.
+{ for a in "$@"; do printf '[%%s]' "$a"; done; echo; } >> "%(log)s"
+# The handle is whatever follows --terminal, wherever it sits in argv.
+h=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "--terminal" ] && { h="$a"; break; }
+  prev="$a"
+done
+stale() {
+  printf '{\n  "ok": false,\n  "error": {\n    "code": "terminal_handle_stale"\n  }\n}\n'
+  exit 1
+}
+case "$1 $2" in
+  "terminal split")
+    [ -n "${FAKE_SPLIT_FAILS:-}" ] && {
+      printf '{\n  "ok": false,\n  "error": {\n    "code": "runtime_error",\n    "message": "Timed out waiting for split pane handle"\n  }\n}\n'
+      exit 1; }
+    # A success whose shape we do not recognise: the pane EXISTS on screen.
+    [ -n "${FAKE_SPLIT_NO_HANDLE:-}" ] && {
+      printf '{\n  "ok": true,\n  "result": {\n    "split": {\n      "tabId": "t1"\n    }\n  }\n}\n'
+      exit 0; }
+    new="${FAKE_HANDLE:-%(new)s}"
+    echo "$new" >> "%(born)s"
+    printf '{\n  "ok": true,\n  "result": {\n    "split": {\n      "handle": "%%s",\n      "tabId": "t1",\n      "paneRuntimeId": 1,\n      "leafId": "l2"\n    }\n  }\n}\n' "$new"
+    ;;
+  "terminal send")
+    [ -n "${FAKE_SEND_FAILS:-}" ] && {
+      printf '{\n  "ok": false,\n  "error": {\n    "code": "runtime_error"\n  }\n}\n'
+      exit 1; }
+    printf '{\n  "ok": true,\n  "result": {\n    "send": {\n      "handle": "%%s"\n    }\n  }\n}\n' "$h"
+    ;;
+  "terminal show")
+    # A handle the app has never heard of is an ERROR (exit 1). A handle it knows
+    # but whose pane is closed is a SUCCESS reporting connected:false — the whole
+    # reason liveness is a field and not an exit status.
+    case " ${FAKE_STALE:-} " in *" $h "*) stale ;; esac
+    case "$h" in
+      term_????????-????-????-????-????????????) ;;
+      *) stale ;;
+    esac
+    live=no
+    case " ${FAKE_ALIVE-%(h)s} " in *" $h "*) live=yes ;; esac
+    grep -qxF "$h" "%(born)s" 2>/dev/null && live=yes
+    grep -qxF "$h" "%(dead)s" 2>/dev/null && live=no
+    if [ "$live" = yes ]; then
+      printf '{\n  "ok": true,\n  "result": {\n    "terminal": {\n      "handle": "%%s",\n      "connected": true,\n      "writable": true,\n      "paneRuntimeId": 1\n    }\n  }\n}\n' "$h"
+    else
+      printf '{\n  "ok": true,\n  "result": {\n    "terminal": {\n      "handle": "%%s",\n      "connected": false,\n      "writable": false,\n      "paneRuntimeId": -1,\n      "exitCause": {\n        "kind": "operator_close"\n      }\n    }\n  }\n}\n' "$h"
+    fi
+    ;;
+  "terminal close")
+    [ -n "${FAKE_CLOSE_FAILS:-}" ] && {
+      printf '{\n  "ok": false,\n  "error": {\n    "code": "runtime_error"\n  }\n}\n'
+      exit 1; }
+    # FAKE_CLOSE_STICKS: the close reports success and the pane stays anyway.
+    [ -n "${FAKE_CLOSE_STICKS:-}" ] || echo "$h" >> "%(dead)s"
+    printf '{\n  "ok": true,\n  "result": {\n    "close": {\n      "handle": "%%s",\n      "ptyKilled": true\n    }\n  }\n}\n' "$h"
+    ;;
+  *) printf '{\n  "ok": true,\n  "result": {}\n}\n' ;;
+esac
+exit 0
+'''
+
+    def setUp(self):
+        super().setUp()
+        self.log = os.path.join(self.tmp, "orca.log")
+        self.dead = os.path.join(self.tmp, "orca.dead")
+        self.born = os.path.join(self.tmp, "orca.born")
+        self.fake = os.path.join(self.tmp, "fake-orca")
+        with open(self.fake, "w") as f:
+            f.write(self.FAKE % {"log": self.log, "dead": self.dead,
+                                 "born": self.born, "h": self.H, "new": self.NEW})
+        os.chmod(self.fake, 0o755)
+
+    def _sh(self, body, **overrides):
+        """Run <body> with common.sh sourced and a controlled terminal env.
+
+        The suite itself may well be running inside Orca/herdr/tmux/iTerm2, so
+        every detector's env var is set explicitly here rather than inherited.
+        """
+        e = dict(os.environ)
+        for v in ("TERM_PROGRAM", "ORCA_TERMINAL_HANDLE", "TMUX", "TMUX_PANE",
+                  "HERDR_ENV", "HERDR_PANE_ID", "HERDR_BIN_PATH", "WEZTERM_PANE",
+                  "ITERM_SESSION_ID", "CBM_BACKEND", "CBM_ORCA_BIN"):
+            e.pop(v, None)
+        e["XDG_STATE_HOME"] = os.path.join(self.tmp, "state")
+        e["CBM_ORCA_BIN"] = self.fake
+        for k, v in overrides.items():
+            if v is None:
+                e.pop(k, None)
+            else:
+                e[k] = v
+        script = '. "%s/common.sh"\n%s' % (os.path.abspath(LIB), body)
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e)
+        return r.stdout.strip(), r
+
+    def _log(self):
+        if not os.path.exists(self.log):
+            return ""
+        with open(self.log) as f:
+            return f.read()
+
+    def _calls(self, verb):
+        """How many times the fake CLI was asked to do `terminal <verb>`."""
+        return len([l for l in self._log().splitlines()
+                    if l.startswith("[terminal][%s]" % verb)])
+
+    def _verbs(self):
+        """The CLI verbs invoked, in order: ['split', 'send', 'focus', ...]."""
+        return [l.split("]")[1].lstrip("[")
+                for l in self._log().splitlines() if l.startswith("[terminal][")]
+
+    def _in_orca(self, **over):
+        over.setdefault("TERM_PROGRAM", "Orca")
+        over.setdefault("ORCA_TERMINAL_HANDLE", self.H)
+        return over
+
+    # -- detection ----------------------------------------------------------
+
+    def test_orca_is_detected(self):
+        """The bug this fixes: $TERM_PROGRAM=Orca matched nothing, so an Orca
+        session got no monitor at all."""
+        out, r = self._sh('cbm_backend; echo', **self._in_orca())
+        self.assertEqual(out, "orca", r.stderr)
+
+    def test_tmux_outranks_orca(self):
+        """A tmux running inside an Orca pane owns the inner layout: an Orca
+        split would land outside tmux's pane tree, where alive/close could never
+        reconcile it."""
+        out, r = self._sh('cbm_backend; echo', **self._in_orca(TMUX="/x"))
+        self.assertEqual(out, "tmux", r.stderr)
+
+    def test_herdr_outranks_orca(self):
+        out, r = self._sh('cbm_backend; echo',
+                          **self._in_orca(HERDR_ENV="1", HERDR_PANE_ID="w1:p1"))
+        self.assertEqual(out, "herdr", r.stderr)
+
+    def test_tmux_disqualifies_the_orca_detector_itself(self):
+        """$ORCA_TERMINAL_HANDLE is an ordinary environment variable, inherited
+        by anything an Orca pane starts and never refreshed — a tmux server first
+        launched from an Orca pane hands it to every window opened from it
+        afterwards. So the detector declines outright when $TMUX is set, rather
+        than relying on the ranking alone."""
+        out, r = self._sh('cbm_detect_orca; echo "rc=$?"', **self._in_orca(TMUX="/x"))
+        self.assertIn("rc=1", out, r.stderr)
+
+    def test_without_a_handle_orca_is_not_claimed(self):
+        """The handle is what makes the answer authoritative — it is injected per
+        pane. Without one there is nothing to split from."""
+        out, r = self._sh('cbm_backend; echo',
+                          TERM_PROGRAM="Orca", ORCA_TERMINAL_HANDLE=None, TMUX="/x")
+        self.assertEqual(out, "tmux", r.stderr)
+
+    def test_cbm_backend_override_still_wins(self):
+        out, r = self._sh('cbm_backend; echo', **self._in_orca(CBM_BACKEND="iterm"))
+        self.assertEqual(out, "iterm", r.stderr)
+
+    # -- state file ---------------------------------------------------------
+
+    def test_an_orca_state_file_round_trips(self):
+        """The regression trap: an unknown backend tag is read as a *legacy*
+        single-line iTerm record, so an Orca pane would have been hunted for
+        among iTerm2 sessions under the name 'orca'."""
+        out, r = self._sh(r'''
+f="$(cbm_state_dir)/s.pane"
+printf 'orca\n%s\n/root\n123\n' > "$f"
+echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
+''' % self.H)
+        self.assertIn("be=orca h=%s" % self.H, out, r.stderr)
+
+    # -- open ---------------------------------------------------------------
+
+    def test_open_splits_bare_then_sends_then_refocuses(self):
+        out, r = self._sh('cbm_open_orca "/bin/watch.sh a b" vertically 25 abcd1234ef',
+                          **self._in_orca())
+        self.assertEqual(out, self.NEW, r.stderr)
+        log = self._log().splitlines()
+        self.assertEqual(len(log), 3, log)
+        # The split is bare, and it is OUR pane that is split, not the focused one.
+        self.assertEqual(log[0], "[terminal][split][--terminal][%s]"
+                                 "[--direction][vertical][--json]" % self.H, log)
+        # exec: the watcher becomes the pane's process, so the pane closes with
+        # it. The whole command is ONE argument to --text — if it ever arrives as
+        # several, the pane runs `exec` with the wrong argv.
+        self.assertEqual(log[1], "[terminal][send][--terminal][%s]"
+                                 "[--text][exec /bin/watch.sh a b]"
+                                 "[--enter][--json]" % self.NEW, log)
+        # focus goes back to the pane Claude is in, never to the new one
+        self.assertEqual(log[2], "[terminal][focus][--terminal][%s][--json]"
+                                 % self.H, log)
+
+    def test_horizontal_split_maps_to_horizontal(self):
+        out, r = self._sh('cbm_open_orca "cmd" horizontally 40 sid', **self._in_orca())
+        self.assertEqual(out, self.NEW, r.stderr)
+        self.assertIn("[--direction][horizontal]", self._log())
+
+    def test_the_split_is_never_given_a_command(self):
+        """Measured: `split --command` worked once, then failed 3/3 with "Timed
+        out waiting for split pane handle" after a 10s hang, creating no pane.
+        A bare split succeeded every time, so the watcher is typed in afterwards.
+        """
+        out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid', **self._in_orca())
+        self.assertEqual(out, self.NEW, r.stderr)
+        self.assertNotIn("[--command]", self._log())
+
+    def test_the_pane_is_never_renamed(self):
+        """`terminal rename` retitles the enclosing TAB as well as the leaf, so
+        labelling the monitor would rename the user's own tab."""
+        out, r = self._sh('cbm_open_orca "cmd" vertically 25 abcd1234ef',
+                          **self._in_orca())
+        self.assertEqual(out, self.NEW, r.stderr)
+        self.assertNotIn("[rename]", self._log())
+        self.assertEqual(self._verbs(), ["split", "send", "focus"], self._log())
+
+    def test_a_split_that_answers_with_our_own_handle_is_refused(self):
+        """The new pane's handle is the only thing that may be driven.
+
+        If the answer ever carried the PARENT's handle — a drift in the JSON
+        shape, an error path echoing the request back — then `send`ing `exec` to
+        it would replace the pane running Claude with the monitor, killing the
+        session it was opened to watch. Well-formed is not the same as different.
+        """
+        out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
+                          **self._in_orca(FAKE_HANDLE=self.H))
+        self.assertIn("rc=1", out, r.stderr)
+        self.assertNotIn("[terminal][send]", self._log())
+        self.assertEqual(self._verbs(), ["split"], self._log())
+
+    def test_a_failed_split_opens_nothing(self):
+        out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
+                          **self._in_orca(FAKE_SPLIT_FAILS="1"))
+        self.assertIn("rc=1", out, r.stderr)
+        self.assertNotIn("[terminal][send]", self._log())
+        self.assertEqual(self._calls("split"), 1, self._log())
+
+    def test_an_unreadable_answer_does_not_split_a_second_time(self):
+        """A split that succeeded has already put a pane on screen, so there is
+        no retry: a second attempt would leave two panes with nothing pointing at
+        either. And an unreadable handle cannot be closed either — closing a
+        handle we guessed at would take out somebody else's pane."""
+        for label, over in (("no handle key", {"FAKE_SPLIT_NO_HANDLE": "1"}),
+                            ("unusable handle", {"FAKE_HANDLE": "term_not-a-uuid"}),
+                            ("uppercase hex", {"FAKE_HANDLE": self.H.upper()})):
+            with self.subTest(label):
+                open(self.log, "w").close()
+                out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
+                                  **self._in_orca(**over))
+                self.assertIn("rc=1", out, r.stderr)
+                self.assertEqual(self._calls("split"), 1, self._log())
+                self.assertNotIn("[terminal][send]", self._log())
+                self.assertNotIn("[terminal][close]", self._log())
+
+    def test_a_pane_that_cannot_be_driven_is_closed_again(self):
+        """Never leak an empty pane: nothing would record it, so nothing could
+        ever close it."""
+        out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
+                          **self._in_orca(FAKE_SEND_FAILS="1"))
+        self.assertIn("rc=1", out, r.stderr)
+        self.assertIn("[terminal][close][--terminal][%s]" % self.NEW, self._log())
+
+    def test_the_size_percentage_is_accepted_and_ignored(self):
+        """Orca always splits 50/50 — there is no size, ratio or percent flag —
+        so CBM_SIZE cannot be honoured here. It must still not break the open,
+        and must not produce arithmetic noise on the hook's stderr."""
+        for size in ("08", "025", "25", "90"):
+            with self.subTest(size):
+                open(self.log, "w").close()
+                # A fresh session id each time: the previous pane is still
+                # "alive" to the fake, and cbm_open_pane is idempotent.
+                out, r = self._sh('cbm_open_pane s%s /tmp/t.jsonl auto; echo "rc=$?"' % size,
+                                  **self._in_orca(CBM_SIZE=size))
+                self.assertIn("rc=0", out, r.stderr)
+                self.assertEqual(r.stderr, "", "arithmetic noise on stderr")
+                for flag in ("[--size]", "[--percent]", "[--ratio]", size):
+                    self.assertNotIn(flag, self._log().split("\n")[0])
+
+    def test_refocus_can_be_turned_off(self):
+        """Measured on 1.4.199: the split leaves the NEW pane active, and
+        `terminal focus` on the parent handle re-activates Claude's leaf. Anyone
+        who would rather land in the monitor sets CBM_ORCA_REFOCUS=0, and then no
+        focus call is made at all."""
+        out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid',
+                          **self._in_orca(CBM_ORCA_REFOCUS="0"))
+        self.assertEqual(out, self.NEW, r.stderr)
+        self.assertNotIn("[terminal][focus]", self._log())
+        self.assertEqual(self._verbs(), ["split", "send"], self._log())
+
+    # -- alive / close ------------------------------------------------------
+
+    def test_alive_is_the_connected_field_not_the_exit_status(self):
+        """Measured: `show` on a pane that has been closed still returns ok:true
+        and exit 0, reporting "connected": false. Reading the exit status would
+        call every dead pane alive — and then hand its handle to `close`."""
+        out, r = self._sh('''
+gone=%s
+"$CBM_ORCA_BIN" terminal show --terminal "$gone" --json >/dev/null 2>&1
+echo "cli=$?"
+cbm_alive_orca "$gone"; echo "alive=$?"
+cbm_alive_orca %s; echo "live=$?"
+''' % (self.NEW, self.H))
+        self.assertIn("cli=0", out, r.stderr)     # the CLI is perfectly happy
+        self.assertIn("alive=1", out, r.stderr)   # we are not
+        self.assertIn("live=0", out, r.stderr)
+
+    def test_a_bad_handle_never_reaches_the_cli(self):
+        """Handles come off disk. A corrupt state file must not turn into an
+        argument — validate the `term_<uuid>` shape first, always."""
+        out, r = self._sh(r'''
+newline="term_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9
+"
+for h in "; rm -rf /" "term_" "" "term_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8fg" \
+         "TERM_0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9" \
+         "term_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f" \
+         "term_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9 extra" \
+         "term_0a1b2c3d4e5f60718293a4b5c6d7e8f9" \
+         "--all" "$newline"; do
+  cbm_alive_orca "$h"; printf 'alive=%s ' "$?"
+  cbm_close_orca "$h"; printf 'close=%s\n' "$?"
+done
+''')
+        self.assertEqual(out.splitlines(), ["alive=1 close=0"] * 10, r.stderr)
+        self.assertEqual(self._log(), "", "the CLI was invoked with a bad handle")
+
+    def test_an_uppercase_handle_is_rejected(self):
+        """Orca's handles are lowercase hex. Anything else is not a handle this
+        tool created, and it is not going to be the first to find out."""
+        out, r = self._sh('cbm_orca_handle_ok %s; echo "lower=$?"\n'
+                          'cbm_orca_handle_ok %s; echo "upper=$?"'
+                          % (self.H, self.H.upper()))
+        self.assertIn("lower=0", out, r.stderr)
+        self.assertIn("upper=1", out, r.stderr)
+
+    def test_a_pane_that_is_already_gone_is_never_closed(self):
+        """*** The one that cost two Claude sessions. ***
+
+        Asking Orca 1.4.199 to close a handle whose pane has already left the tab
+        layout closes a DIFFERENT pane in that tab — twice it killed the session
+        that had created the split. A pane that closed a moment ago, or whose
+        shell exited on its own (which is how this monitor retires itself), is
+        exactly that case. So a handle reporting connected:false is never passed
+        to `terminal close` at all.
+        """
+        out, r = self._sh('cbm_close_orca %s; echo "rc=$?"' % self.NEW)
+        self.assertIn("rc=0", out, r.stderr)
+        self.assertEqual(self._verbs(), ["show"], self._log())
+        self.assertNotIn("[terminal][close]", self._log(),
+                         "a pane that had already left the layout was closed anyway")
+
+    def test_a_retired_pane_is_forgotten_without_ever_being_closed(self):
+        """The retirement path, end to end — the one the bug actually fires on.
+
+        A watcher that sees itself out exits, and Orca drops its pane from the
+        layout by itself. SessionEnd then runs against a state file pointing at a
+        handle that is already gone. Closing it would take out a different pane in
+        the tab, so the record must be cleaned up on the strength of `show` alone.
+        """
+        out, r = self._sh(r'''
+f="$(cbm_state_dir)/retired.pane"
+cbm_state_write "$f" orca %s "$(cbm_plugin_root)" ""
+cbm_close_recorded_pane "$f"; echo "rc=$?"
+[ -f "$f" ] && echo "record=kept" || echo "record=gone"
+''' % self.NEW)
+        self.assertIn("rc=0", out, r.stderr)
+        self.assertIn("record=gone", out, r.stderr)
+        self.assertNotIn("[terminal][close]", self._log(),
+                         "a retired pane's handle was passed to `terminal close`")
+        # Three liveness checks and nothing else: the guard, then the two the
+        # close path makes on its own account (the retry gate, and the one that
+        # decides the record can be dropped). Each is a ~0.08s `show`.
+        self.assertEqual(self._verbs(), ["show", "show", "show"], self._log())
+
+    def test_a_live_pane_is_closed(self):
+        out, r = self._sh('''
+cbm_close_orca %s; echo "rc=$?"
+cbm_alive_orca %s; echo "after=$?"
+''' % (self.H, self.H))
+        self.assertIn("rc=0", out, r.stderr)
+        self.assertIn("after=1", out, r.stderr)
+        self.assertIn("[terminal][close][--terminal][%s]" % self.H, self._log())
+
+    def test_close_never_reaches_for_a_tab_or_everything(self):
+        """`--tab` and `--worktree --all` close more than the monitor pane."""
+        out, r = self._sh('cbm_close_orca %s' % self.H)
+        for flag in ("[--tab]", "[--all]", "[--worktree]"):
+            self.assertNotIn(flag, self._log())
+
+    def test_close_is_best_effort(self):
+        """A close the CLI refuses is reported as done: the caller re-checks
+        liveness anyway, and a non-zero here would abort a teardown."""
+        out, r = self._sh('cbm_close_orca %s; echo "rc=$?"' % self.H,
+                          FAKE_CLOSE_FAILS="1")
+        self.assertIn("rc=0", out, r.stderr)
+        self.assertIn("[terminal][close]", self._log())
+
+    # -- end to end ---------------------------------------------------------
+
+    def test_open_pane_records_the_orca_backend(self):
+        out, r = self._sh(r'''
+cbm_open_pane sess-1 /tmp/t.jsonl auto; echo "rc=$?"
+cat "$(cbm_state_dir)/sess-1.pane"
+''', **self._in_orca())
+        lines = out.splitlines()
+        self.assertIn("rc=0", lines, r.stderr)
+        self.assertEqual(lines[1], "orca", out)
+        self.assertEqual(lines[2], self.NEW, out)
+
+    def test_a_plugin_root_with_spaces_survives_the_exec_line(self):
+        """The watcher PATH is quoted like every argument after it.
+
+        The exec line is typed into a shell, so an unquoted path containing a
+        space runs the wrong command with the rest as arguments, and one
+        containing a glob character expands against the pane's cwd. The path is
+        the plugin's own install location — a marketplace cache or a checkout —
+        so it is not under this tool's control. This drives the real
+        cbm_open_pane out of a copy of lib/ under a hostile directory name.
+        """
+        root = os.path.join(self.tmp, "plug in [v1]")
+        shutil.copytree(os.path.abspath(LIB), os.path.join(root, "lib"))
+        out, r = self._sh('. "%s/lib/common.sh"\n'
+                          'cbm_open_pane spacey /tmp/t.jsonl auto; echo "rc=$?"' % root,
+                          **self._in_orca())
+        self.assertIn("rc=0", out, r.stderr)
+        send = [l for l in self._log().splitlines()
+                if l.startswith("[terminal][send]")]
+        self.assertEqual(len(send), 1, self._log())
+        self.assertIn("[exec '%s/lib/../bin/watch.sh' 'spacey' '/tmp/t.jsonl'"
+                      % root, send[0])
+
+    def test_the_session_end_close_path_speaks_orca(self):
+        """SessionEnd is a fresh process: it closes via the RECORDED backend, and
+        that close still goes through the liveness guard."""
+        out, r = self._sh(r'''
+f="$(cbm_state_dir)/s.pane"
+printf 'orca\n%s\n%%s\n\n' "$(cbm_plugin_root)" > "$f"
+cbm_close_recorded_pane "$f"; echo "rc=$?"
+[ -f "$f" ] && echo "record=kept" || echo "record=gone"
+''' % self.H)
+        self.assertIn("rc=0", out, r.stderr)
+        self.assertIn("record=gone", out, r.stderr)
+        # Asked whether it was there, closed it, checked again (the retry gate),
+        # checked once more before forgetting the record. Every `close` in that
+        # sequence sits behind a `show` that said connected:true.
+        self.assertEqual(self._verbs(),
+                         ["show", "close", "show", "show"], self._log())
+
+    def test_the_close_retry_also_goes_through_the_liveness_guard(self):
+        """One retry is allowed at teardown, and it must not become the bug: each
+        attempt re-checks `connected` before naming a handle to `close`."""
+        out, r = self._sh(r'''
+f="$(cbm_state_dir)/s.pane"
+printf 'orca\n%s\n%%s\n\n' "$(cbm_plugin_root)" > "$f"
+cbm_close_recorded_pane "$f"; echo "rc=$?"
+[ -f "$f" ] && echo "record=kept" || echo "record=LOST"
+''' % self.H, FAKE_CLOSE_STICKS="1")
+        self.assertIn("rc=1", out, r.stderr)
+        self.assertIn("record=kept", out, r.stderr)   # still findable
+        self.assertEqual(self._calls("close"), 2, self._log())
+        # Two closes, each preceded by its own guard, plus the verification after
+        # each: no `close` is ever issued without a fresh `show` in front of it.
+        self.assertEqual(self._calls("show"), 4, self._log())
+        self.assertEqual(self._verbs(),
+                         ["show", "close", "show", "show", "close", "show"],
+                         self._log())
+
+    def test_open_pane_records_nothing_when_the_pane_cannot_run(self):
+        out, r = self._sh(r'''
+cbm_open_pane sess-2 /tmp/t.jsonl auto; echo "rc=$?"
+[ -f "$(cbm_state_dir)/sess-2.pane" ] && echo "state=WRITTEN" || echo "state=none"
+''', **self._in_orca(FAKE_SEND_FAILS="1"))
+        self.assertIn("rc=1", out, r.stderr)
+        self.assertIn("state=none", out, r.stderr)
+        self.assertIn("[terminal][close][--terminal][%s]" % self.NEW, self._log())
 
 
 class TestAgentSessionsGetNoPane(Base):

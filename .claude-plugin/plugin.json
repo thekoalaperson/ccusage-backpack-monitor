@@ -1,7 +1,7 @@
 {
   "name": "ccusage-backpack-monitor",
-  "description": "Live side-pane usage monitor for Claude Code (herdr, tmux, WezTerm, iTerm2): accurate per-model cost, subagent spend, and 5h burn rate, read straight from the session transcripts.",
-  "version": "0.12.0",
+  "description": "Live side-pane usage monitor for Claude Code (herdr, tmux, Orca, WezTerm, iTerm2): accurate per-model cost, subagent spend, and 5h burn rate, read straight from the session transcripts.",
+  "version": "0.13.0",
   "author": {
     "name": "Kartavya Kothari",
     "url": "https://github.com/thekoalaperson"
@@ -16,6 +16,7 @@
     "tokens",
     "herdr",
     "tmux",
+    "orca",
     "wezterm",
     "iterm2",
     "monitor",

@@ -9,7 +9,7 @@ cbm_fix_path   # slash commands run with a stripped PATH; make tmux/wezterm/ccus
 
 if ! cbm_is_supported; then
   echo "ccusage-backpack-monitor: this terminal can't be scripted to open a side pane"
-  echo "  (supported: herdr, tmux, WezTerm, iTerm2). Terminal.app / VS Code / Ghostty"
+  echo "  (supported: herdr, tmux, Orca, WezTerm, iTerm2). Terminal.app / VS Code / Ghostty"
   echo "  have no split-pane API, so there's nothing to open here."
   echo "  Tip: run Claude inside tmux — 'tmux', then 'claude' — and the monitor opens"
   echo "  as a tmux split in ANY terminal."
@@ -68,6 +68,6 @@ case $? in
   3) echo "◻️  Closed ccusage monitor for session ${sid:0:8}. Run it again to reopen." ;;
   5) echo "⏭️  Left session ${sid:0:8}'s monitor alone — that session belongs to another running Claude process, not this one." ;;
   4) echo "🔄 Restarted ccusage monitor for session ${sid:0:8} on v$(cbm_plugin_version) (replaced a pane that was stale or duplicated)." ;;
-  *) echo "Could not open the pane (backend: $(cbm_backend)). On iTerm2, check Automation permission; on herdr, that its server is running (\`herdr status\`)." ;;
+  *) echo "Could not open the pane (backend: $(cbm_backend)). On iTerm2, check Automation permission; on herdr, that its server is running (\`herdr status\`); on Orca, that its CLI answers: \`/Applications/Orca.app/Contents/Resources/bin/orca terminal list\`." ;;
 esac
 exit 0

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # SessionStart hook: open a side pane with a live ccusage readout scoped to THIS
-# Claude Code session (herdr, tmux, WezTerm, or iTerm2), and remember it so we
-# can close it on exit.
+# Claude Code session (herdr, tmux, Orca, WezTerm, or iTerm2), and remember it so
+# we can close it on exit.
 #
 # Config (env vars, all optional):
 #   CBM_POLL   seconds between cheap file-change checks (default 3)
 #   CBM_SPLIT  "vertically" (side-by-side) or "horizontally" (default vertically)
 #   CBM_SIZE   percent of the terminal the pane takes, 5-90 (default 25) -- the
-#              main Claude session keeps the rest (a 3:1 split by default)
+#              main Claude session keeps the rest (a 3:1 split by default).
+#              Not honoured on Orca, whose split is always 50/50 (no size flag).
 #
 # Notes:
 #  - On iTerm2, the first run triggers a one-time macOS Automation prompt.
@@ -19,7 +20,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 
 input="$(cat)"
 cbm_fix_path                 # put Homebrew/npm (tmux, wezterm, ccusage) on PATH FIRST
-cbm_is_supported || exit 0   # no-op unless herdr/tmux/WezTerm/iTerm2 is active
+cbm_is_supported || exit 0   # no-op unless herdr/tmux/Orca/WezTerm/iTerm2 is active
 
 sid="$(printf '%s' "$input"   | cbm_json_field session_id)"
 trans="$(printf '%s' "$input" | cbm_json_field transcript_path)"
