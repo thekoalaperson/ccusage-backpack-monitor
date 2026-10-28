@@ -1,5 +1,5 @@
 {
-  "name": "ccusage-backpack-monitor",
+  "name": "pane",
   "owner": {
     "name": "Kartavya Kothari",
     "url": "https://github.com/thekoalaperson"
@@ -9,7 +9,7 @@
   },
   "plugins": [
     {
-      "name": "ccusage-backpack-monitor",
+      "name": "pane",
       "source": ".",
       "description": "Opens a side pane with a live, change-driven usage readout for the current session — per-model cost, subagent breakdown, 5h burn rate; closes it on exit."
     }

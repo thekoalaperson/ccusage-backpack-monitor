@@ -17,17 +17,17 @@ The layout adapts to the pane width: fields are dropped in order of importance
 until each row fits, so a 24-column pane degrades instead of wrapping.
 
 Env knobs:
-  CBM_TABS         "0" hides the tab strip -- a single static panel, as before
-  CBM_BLOCKS       "0" hides the burn-rate line
-  CBM_GRAPH        "0" hides the sparkline
-  CBM_AGENTS       "0" hides the subagent breakdown
-  CBM_CONTEXT      "0" hides the context-window gauge
-  CBM_LIMITS       "0" hides the account rate-limit meters
-  CBM_ACCOUNT      "0" hides account identity entirely; "full" adds email + org
+  PANE_TABS         "0" hides the tab strip -- a single static panel, as before
+  PANE_BLOCKS       "0" hides the burn-rate line
+  PANE_GRAPH        "0" hides the sparkline
+  PANE_AGENTS       "0" hides the subagent breakdown
+  PANE_CONTEXT      "0" hides the context-window gauge
+  PANE_LIMITS       "0" hides the account rate-limit meters
+  PANE_ACCOUNT      "0" hides account identity entirely; "full" adds email + org
                    (default: first name only -- this pane gets screen-shared)
-  CBM_BG           256-color index for an opaque background card (e.g. 234);
+  PANE_BG           256-color index for an opaque background card (e.g. 234);
                    unset = transparent-friendly (no background fill)
-  CBM_NO_NETWORK   "1" never refresh pricing over the network
+  PANE_NO_NETWORK   "1" never refresh pricing over the network
   NO_COLOR         set (any value) to disable ANSI color entirely
 Exit 0 always; prints a "waiting" line if data isn't ready yet.
 """
@@ -40,15 +40,15 @@ import account as acct                 # noqa: E402
 
 sid = sys.argv[1] if len(sys.argv) > 1 else ""
 transcript = sys.argv[2] if len(sys.argv) > 2 else ""
-SHOW_BLOCKS = os.environ.get("CBM_BLOCKS", "1") != "0"
-SHOW_GRAPH = os.environ.get("CBM_GRAPH", "1") != "0"
-SHOW_AGENTS = os.environ.get("CBM_AGENTS", "1") != "0"
-SHOW_CONTEXT = os.environ.get("CBM_CONTEXT", "1") != "0"
-SHOW_LIMITS = os.environ.get("CBM_LIMITS", "1") != "0"
-SHOW_TABS = os.environ.get("CBM_TABS", "1") != "0"
-ACCOUNT_MODE = os.environ.get("CBM_ACCOUNT", "").lower()
+SHOW_BLOCKS = os.environ.get("PANE_BLOCKS", "1") != "0"
+SHOW_GRAPH = os.environ.get("PANE_GRAPH", "1") != "0"
+SHOW_AGENTS = os.environ.get("PANE_AGENTS", "1") != "0"
+SHOW_CONTEXT = os.environ.get("PANE_CONTEXT", "1") != "0"
+SHOW_LIMITS = os.environ.get("PANE_LIMITS", "1") != "0"
+SHOW_TABS = os.environ.get("PANE_TABS", "1") != "0"
+ACCOUNT_MODE = os.environ.get("PANE_ACCOUNT", "").lower()
 SHOW_ACCOUNT = ACCOUNT_MODE != "0"
-BG = os.environ.get("CBM_BG", "").strip()
+BG = os.environ.get("PANE_BG", "").strip()
 
 # Respect NO_COLOR (no-color.org) so the panel is readable in plain terminals,
 # piped output, and logs. BG implies a styled card, so it forces color back on.
@@ -891,7 +891,8 @@ def tab_account():
             kv("since", time.strftime("%d %b %Y", time.localtime(ident["since"])),
                out, kw=8, col=GREY)
         if not ident.get("email"):
-            out.append(line("  %sCBM_ACCOUNT=full adds email%s" % (GREY, RESET)))
+            out.append(line(fit([("  %sPANE_ACCOUNT=full" % GREY, True),
+                                 (" adds email", False), (RESET, True)])))
 
     sect("SESSION")
     if meta.get("title"):
@@ -922,7 +923,7 @@ draw_tabs()
 (tab_live, tab_limits, tab_models, tab_agents, tab_trend, tab_account)[TAB]()
 
 out.append(line())
-if SHOW_TABS and os.environ.get("CBM_HELP") == "1":
+if SHOW_TABS and os.environ.get("PANE_HELP") == "1":
     out.append(line("%sKEYS%s" % (BOLD, RESET)))
     for k, what in (("<- ->", "previous / next tab"),
                     ("Tab", "next tab"),

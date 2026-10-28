@@ -1,4 +1,4 @@
-# AGENTS.md — ccusage-backpack-monitor
+# AGENTS.md — pane
 
 Guidance for working in this repo, for developers and agents.
 
@@ -9,7 +9,7 @@ This tool's core promise is that it costs ~nothing when idle and scales with
 
 - The watcher is **change-driven**. When idle it must do nothing but a cheap
   `stat` on the session transcript and its `subagents/` directory (every
-  `CBM_POLL` seconds). **Never** introduce a fixed-interval render loop.
+  `PANE_POLL` seconds). **Never** introduce a fixed-interval render loop.
 - Render **only when something actually changed**.
 - **Never shell out to `ccusage` in the render path.** That call rescans every
   transcript on the machine: ~2s wall and ~16 CPU-seconds per turn, which broke
@@ -69,8 +69,8 @@ integrates with* is fine and necessary.
 - `lib/pricing.py`    — model rates: bundled table + daily LiteLLM refresh
 - `bin/close-pane.sh` — SessionEnd hook: close that exact pane
 - `lib/common.sh`     — shared helpers (python/ccusage detection, PATH, state) plus
-  the terminal backends: `cbm_{detect,open,alive,close}_<be>` for herdr, tmux,
-  orca, wezterm and iterm, resolved in that order by `cbm_backend`
+  the terminal backends: `pane_{detect,open,alive,close}_<be>` for herdr, tmux,
+  orca, wezterm and iterm, resolved in that order by `pane_backend`
 - `tests/test_usage.py` — fixture-based regression suite
 
 ## Releases

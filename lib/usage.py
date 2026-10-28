@@ -29,7 +29,7 @@ MODEL_ZERO = {"cost": 0.0, "input": 0, "output": 0, "cache_read": 0,
 def _state_dir():
     d = os.path.join(os.environ.get("XDG_STATE_HOME",
                                     os.path.expanduser("~/.local/state")),
-                     "ccusage-backpack-monitor")
+                     "pane")
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:

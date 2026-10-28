@@ -4,6 +4,30 @@ All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] - 2026-10-29
+
+### Changed
+- **Renamed from ccusage-backpack-monitor to pane.** The plugin stopped calling
+  ccusage in v0.8.0 and reads the transcripts itself, so the old name pointed at a
+  different tool. Entries below keep the names they shipped under.
+
+  Everything carrying the name moved with it, with no aliases for the old ones:
+
+  - Install: `/plugin marketplace add thekoalaperson/pane`, then
+    `/plugin install pane@pane`. Uninstall the old plugin first.
+  - The slash command is `/pane:toggle` (was
+    `/ccusage-backpack-monitor:ccusage-monitor`).
+  - Settings are `PANE_*` (was `CBM_*`): `PANE_POLL`, `PANE_SIZE`,
+    `PANE_BACKEND`, `PANE_ACCOUNT` and the rest, same meanings and defaults.
+  - State is `~/.local/state/pane` and pricing overrides
+    `~/.config/pane/pricing.json`. Move an existing `pricing.json` across; the
+    old state directory can be deleted.
+  - A herdr pane is titled `pane <session>` (was `ccusage <session>`).
+
+### Fixed
+- The account tab's `PANE_ACCOUNT=full` hint is fitted like every other row,
+  dropping "adds email" on a narrow pane instead of being cut mid-phrase.
+
 ## [0.13.0] - 2026-09-16
 
 ### Added
