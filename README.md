@@ -1,9 +1,8 @@
-# ccusage-backpack-monitor
+# pane
 
 A Claude Code plugin that pops open a **side pane** showing a **live,
 change-driven cost readout** for the session you just started — and closes that
-pane automatically when the session ends. Think of it as a usage "backpack" your
-session carries while it runs.
+pane automatically when the session ends.
 
 It reads Claude Code's own transcripts, so it prices **every model** (including
 ones released after this plugin was), counts **subagent and workflow spend**
@@ -14,10 +13,10 @@ It works in **herdr**, **tmux**, **Orca**, **WezTerm**, and **iTerm2**, on
 
 <p align="center">
   <img src="assets/hero.png" width="820"
-       alt="A live ccusage cost pane — spend, per-model breakdown, burn rate, and a tokens-per-turn sparkline — in a side pane beside a Claude Code session">
+       alt="A live cost pane — spend, per-model breakdown, burn rate, and a tokens-per-turn sparkline — in a side pane beside a Claude Code session">
 </p>
 
-> **Status:** v0.13.0 — supports herdr (macOS/Linux), tmux (macOS/Linux),
+> **Status:** v0.14.0 — supports herdr (macOS/Linux), tmux (macOS/Linux),
 > Orca (macOS), WezTerm (macOS/Linux), and iTerm2 (macOS). In any other terminal
 > the hooks no-op silently, so it's safe to install anywhere.
 
@@ -49,7 +48,7 @@ Three things it gets right that a generic `ccusage session` call does not:
     `herdr pane split`, inside herdr's own tab.
   - **tmux** (macOS or Linux) — the pane is a `tmux split-window`.
   - **Orca** (macOS) — the pane is an `orca terminal split`, in the same Orca
-    tab. Orca splits **50/50 only** (it has no size flag), so `CBM_SIZE` is
+    tab. Orca splits **50/50 only** (it has no size flag), so `PANE_SIZE` is
     ignored there; the watcher is typed into the new pane with `orca terminal
     send` rather than passed to the split, because `split --command` proved
     unreliable (it worked once, then timed out three times out of three, leaving
@@ -63,7 +62,7 @@ Three things it gets right that a generic `ccusage session` call does not:
   terminal around it would put the monitor outside that layout — over the whole
   window, and still there after you switch tabs. So if you run herdr or tmux
   inside iTerm2, Orca or WezTerm, the multiplexer's split is used. You can force
-  a choice with `CBM_BACKEND` (see Configuration).
+  a choice with `PANE_BACKEND` (see Configuration).
 
   One exception to the order: `$TMUX` wins over both herdr and Orca. Their pane
   variables are ordinary environment variables, so a tmux server first started
@@ -71,7 +70,7 @@ Three things it gets right that a generic `ccusage session` call does not:
   afterwards — including ones attached from a plain terminal, where splitting on
   that stale pane handle would put the monitor somewhere unrelated. When both are
   set the tmux pane is where Claude actually is. If you run herdr *inside* tmux,
-  set `CBM_BACKEND=herdr`.
+  set `PANE_BACKEND=herdr`.
 - **`python3`** — the only real dependency, resolved via your `PATH` (macOS
   ships one at `/usr/bin/python3`; it may prompt to install the Xcode Command
   Line Tools the first time). No pip packages; the standard library is enough.
@@ -87,7 +86,7 @@ Three things it gets right that a generic `ccusage session` call does not:
 | herdr / tmux / Orca / WezTerm / iTerm2 + python3 | Full rich panel (cost, agents, burn rate, sparkline) |
 | Supported terminal, no python3, ccusage present | Plain `ccusage` text fallback, still live |
 | Supported terminal, **neither** | Pane shows the exact, OS-aware fix and becomes a shell so you can run it |
-| **Orca** (macOS) | Full support, except that the split is always 50/50 — `CBM_SIZE` has no effect |
+| **Orca** (macOS) | Full support, except that the split is always 50/50 — `PANE_SIZE` has no effect |
 | herdr, tmux or WezTerm on **Linux** | Full support |
 | Any other terminal (plain Terminal.app, kitty, Ghostty, …) | Hooks **no-op silently** (safe to leave installed) |
 
@@ -104,8 +103,8 @@ runtime dependencies are a supported terminal and the stock `python3`.
 Inside Claude Code:
 
 ```text
-/plugin marketplace add thekoalaperson/ccusage-backpack-monitor
-/plugin install ccusage-backpack-monitor@ccusage-backpack-monitor
+/plugin marketplace add thekoalaperson/pane
+/plugin install pane@pane
 ```
 
 Then start a fresh `claude` in herdr, tmux, Orca, WezTerm, or iTerm2 — a side
@@ -117,8 +116,8 @@ pane opens automatically.
 Point the marketplace at a local checkout instead of GitHub:
 
 ```text
-/plugin marketplace add /path/to/ccusage-backpack-monitor
-/plugin install ccusage-backpack-monitor@ccusage-backpack-monitor
+/plugin marketplace add /path/to/pane
+/plugin install pane@pane
 ```
 
 An open pane picks up an updated watcher by itself, on its next redraw — `bash`
@@ -128,9 +127,9 @@ left open for days would keep running the build it started with.
 
 ## Commands
 
-`/ccusage-backpack-monitor:ccusage-monitor` — **toggles** the monitor pane for
+`/pane:toggle` — **toggles** the monitor pane for
 the **current** session: run it once to open, again to close. Plugin commands are
-namespaced, so type `/ccusage` and let autocomplete finish it.
+namespaced, so type `/pane` and let autocomplete finish it.
 
 If the open pane was started by an older version of the plugin (i.e. you upgraded
 mid-session), or a stray duplicate is open, toggling **replaces** them with a
@@ -145,24 +144,24 @@ Set these as environment variables before launching `claude`:
 
 | Var                  | Default       | Meaning                                              |
 |----------------------|---------------|------------------------------------------------------|
-| `CBM_POLL`           | `3`           | Seconds between cheap file-change checks              |
-| `CBM_SPLIT`          | `vertically`  | `vertically` (side-by-side) or `horizontally`        |
-| `CBM_SIZE`           | `25`          | Percent of the terminal the monitor pane takes (clamped to 5–90). The main Claude session keeps the rest, so the default is a 3:1 split in Claude's favor. Applies to herdr, tmux, WezTerm and iTerm2. **Ignored on Orca**, which has no size flag and always splits 50/50. |
-| `CBM_BACKEND`        | _(auto)_      | Force a terminal backend: `herdr`, `tmux`, `orca`, `wezterm`, or `iterm`. Unset = auto-detect (herdr → tmux → Orca → WezTerm → iTerm2). `$TMUX` wins over herdr and Orca when both are set, so set this to `herdr` if you run herdr inside tmux. |
-| `CBM_WEZTERM_PERCENT`| `CBM_SIZE`    | WezTerm-only override for the split size (percent of the source pane). Unset, it inherits `CBM_SIZE`. |
-| `CBM_ORCA_BIN`       | _(auto)_      | Path to the `orca` CLI. Unset, the app bundle's copy is used (`/Applications/Orca.app/Contents/Resources/bin/orca`), falling back to `orca` on `PATH` — the bundle first, because the `/usr/local/bin` symlink can be broken. |
-| `CBM_ORCA_REFOCUS`   | `1`           | Orca only: after splitting, focus is handed back to the pane Claude is in, so you keep typing where you were. `0` skips that and leaves the new monitor pane active. |
-| `CBM_BLOCKS`         | `1`           | `0` hides the 5h burn-rate/projection section        |
-| `CBM_TABS`           | `1`           | `0` disables the tab strip and arrow-key navigation — a single static panel |
-| `CBM_LIMITS`         | `1`           | `0` hides the account rate-limit meters (5h / weekly) |
-| `CBM_ACCOUNT`        | _(name only)_ | `0` hides account identity entirely; `full` adds your email and organisation name |
-| `CBM_AGENTS`         | `1`           | `0` hides the subagent breakdown                     |
-| `CBM_GRAPH`          | `1`           | `0` hides the sparkline                              |
-| `CBM_CONTEXT`        | `1`           | `0` hides the context-window gauge                   |
-| `NO_COLOR`           | _(unset)_     | Set (any value) to disable ANSI color entirely ([no-color.org](https://no-color.org)). `CBM_BG` overrides it. |
-| `CBM_NO_NETWORK`     | _(unset)_     | `1` pins pricing to the bundled table (no daily refresh) |
-| `CBM_BG`             | _(unset)_     | A 256-color index (e.g. `234`) paints an opaque background card behind the panel — useful in **transparent terminals**. Unset = solid high-contrast text, no fill. |
-| `CBM_ALTSCREEN`      | `1`           | The panel draws on the terminal's **alternate screen**, like `vim` or `less`, so the pane's previous contents come back when it exits. `0` draws on the primary buffer instead and clears scrollback on the way in. Either way the panel erases nothing as it runs, so redraws cannot reach scrollback. |
+| `PANE_POLL`           | `3`           | Seconds between cheap file-change checks              |
+| `PANE_SPLIT`          | `vertically`  | `vertically` (side-by-side) or `horizontally`        |
+| `PANE_SIZE`           | `25`          | Percent of the terminal the monitor pane takes (clamped to 5–90). The main Claude session keeps the rest, so the default is a 3:1 split in Claude's favor. Applies to herdr, tmux, WezTerm and iTerm2. **Ignored on Orca**, which has no size flag and always splits 50/50. |
+| `PANE_BACKEND`        | _(auto)_      | Force a terminal backend: `herdr`, `tmux`, `orca`, `wezterm`, or `iterm`. Unset = auto-detect (herdr → tmux → Orca → WezTerm → iTerm2). `$TMUX` wins over herdr and Orca when both are set, so set this to `herdr` if you run herdr inside tmux. |
+| `PANE_WEZTERM_PERCENT`| `PANE_SIZE`    | WezTerm-only override for the split size (percent of the source pane). Unset, it inherits `PANE_SIZE`. |
+| `PANE_ORCA_BIN`       | _(auto)_      | Path to the `orca` CLI. Unset, the app bundle's copy is used (`/Applications/Orca.app/Contents/Resources/bin/orca`), falling back to `orca` on `PATH` — the bundle first, because the `/usr/local/bin` symlink can be broken. |
+| `PANE_ORCA_REFOCUS`   | `1`           | Orca only: after splitting, focus is handed back to the pane Claude is in, so you keep typing where you were. `0` skips that and leaves the new monitor pane active. |
+| `PANE_BLOCKS`         | `1`           | `0` hides the 5h burn-rate/projection section        |
+| `PANE_TABS`           | `1`           | `0` disables the tab strip and arrow-key navigation — a single static panel |
+| `PANE_LIMITS`         | `1`           | `0` hides the account rate-limit meters (5h / weekly) |
+| `PANE_ACCOUNT`        | _(name only)_ | `0` hides account identity entirely; `full` adds your email and organisation name |
+| `PANE_AGENTS`         | `1`           | `0` hides the subagent breakdown                     |
+| `PANE_GRAPH`          | `1`           | `0` hides the sparkline                              |
+| `PANE_CONTEXT`        | `1`           | `0` hides the context-window gauge                   |
+| `NO_COLOR`           | _(unset)_     | Set (any value) to disable ANSI color entirely ([no-color.org](https://no-color.org)). `PANE_BG` overrides it. |
+| `PANE_NO_NETWORK`     | _(unset)_     | `1` pins pricing to the bundled table (no daily refresh) |
+| `PANE_BG`             | _(unset)_     | A 256-color index (e.g. `234`) paints an opaque background card behind the panel — useful in **transparent terminals**. Unset = solid high-contrast text, no fill. |
+| `PANE_ALTSCREEN`      | `1`           | The panel draws on the terminal's **alternate screen**, like `vim` or `less`, so the pane's previous contents come back when it exits. `0` draws on the primary buffer instead and clears scrollback on the way in. Either way the panel erases nothing as it runs, so redraws cannot reach scrollback. |
 
 The panel shows **every model used in the session** — including those used by
 subagents — with its own cost, a cost-share bar, and token count. When a session
@@ -206,8 +205,8 @@ disappears and nothing else changes.
 
 Your **plan** (`Max 5x`, `Pro`, `Team`, …) is shown from the same file. Identity
 defaults to a **first name only**, because this pane ends up in screen-shares and
-recordings; `CBM_ACCOUNT=full` opts into the email and organisation name, and
-`CBM_ACCOUNT=0` turns it off entirely.
+recordings; `PANE_ACCOUNT=full` opts into the email and organisation name, and
+`PANE_ACCOUNT=0` turns it off entirely.
 
 ### Tabs
 
@@ -242,7 +241,7 @@ without asking for help, and the active tab is highlighted — bracketed under
 This costs nothing when idle: the keypress read **replaces** the sleep at the end
 of the watch loop rather than adding to it, so the poll interval is unchanged.
 Without a terminal on stdin it falls back to `sleep` and behaves exactly as
-before. `CBM_TABS=0` restores the single static panel.
+before. `PANE_TABS=0` restores the single static panel.
 
 A `~` anywhere on the panel means the same thing throughout: a figure we will
 not vouch for as current or exact — an estimated rate, or a cached limit old
@@ -252,16 +251,16 @@ regardless.
 Because the panel redraws in place, it runs on the terminal's **alternate
 screen** (as `vim` and `less` do), so nothing it draws is ever left behind in
 scrollback. Leaving it — `q`, `Ctrl-C`, or the session ending — restores the
-pane. See `CBM_ALTSCREEN` if your terminal doesn't support it.
+pane. See `PANE_ALTSCREEN` if your terminal doesn't support it.
 
 ### Pricing
 
 Rates come from a bundled table, refreshed at most once a day from
 [LiteLLM](https://github.com/BerriAI/litellm) into
-`~/.local/state/ccusage-backpack-monitor/pricing.json`. A model missing from
+`~/.local/state/pane/pricing.json`. A model missing from
 both falls back to a per-family estimate and is marked `~` in the panel, so a
 newly released model is never silently free. To pin a rate yourself, create
-`~/.config/ccusage-backpack-monitor/pricing.json`:
+`~/.config/pane/pricing.json`:
 
 ```json
 { "claude-opus-5": { "input": 5.0, "output": 25.0 } }
@@ -274,14 +273,14 @@ Values are USD per million tokens; cache rates are derived (read 0.1x input,
 
 The watcher is **change-driven, not interval-driven**. When idle it only does a
 cheap `stat` on this session's transcript and its subagent directory every
-`CBM_POLL` seconds — no subprocess, no parsing. It renders only when something
+`PANE_POLL` seconds — no subprocess, no parsing. It renders only when something
 actually changed, so cost is proportional to real activity, not wall-clock time.
 
 A render is **~0.07s**. Earlier versions shelled out to `ccusage session`, which
 rescans every transcript on the machine — ~2s wall and ~16 CPU-seconds, on every
 turn. Reading only this session's files removed that. Per-file results are
 memoised by size and mtime in
-`~/.local/state/ccusage-backpack-monitor/scan-cache.json`, so finished agents are
+`~/.local/state/pane/scan-cache.json`, so finished agents are
 never re-read.
 
 ## How it works
@@ -297,13 +296,13 @@ never re-read.
 | close  | `bin/close-pane.sh` | `SessionEnd`   | look up the handle, close that exact pane via its backend |
 
 **Backends.** All terminal-specific logic lives in `lib/common.sh` as small
-per-backend functions — `cbm_{detect,open,alive,close}_<backend>`. A cached
-`cbm_backend()` picks the active one (herdr → tmux → Orca → WezTerm → iTerm2).
+per-backend functions — `pane_{detect,open,alive,close}_<backend>`. A cached
+`pane_backend()` picks the active one (herdr → tmux → Orca → WezTerm → iTerm2).
 Adding a new terminal (kitty, Ghostty, …) is four functions plus one word in that
 list.
 
 State (one tiny `<session-id>.pane` file per session) lives in
-`~/.local/state/ccusage-backpack-monitor` and self-prunes after a day. It records
+`~/.local/state/pane` and self-prunes after a day. It records
 the **backend** and the **pane handle** (two lines) so the `SessionEnd` hook — a
 fresh process whose environment may differ — closes via the recorded backend
 rather than re-detecting. (A fixed path on purpose: the hooks and the slash

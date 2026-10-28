@@ -26,8 +26,8 @@ Three rules this module holds to:
    defensive and a missing key hides a row rather than raising.
 
 Privacy: this pane is on screen during screen-shares and recordings, so the
-default identity is a first name only. `CBM_ACCOUNT=full` opts into the email
-and organisation name; `CBM_ACCOUNT=0` turns the whole thing off.
+default identity is a first name only. `PANE_ACCOUNT=full` opts into the email
+and organisation name; `PANE_ACCOUNT=0` turns the whole thing off.
 """
 import json, os, re, time
 
@@ -142,7 +142,7 @@ class Account:
     def identity(self):
         """-> {name, email, org, plan, billing, role, since} or None.
 
-        `email` and `org` are only populated when CBM_ACCOUNT=full, so the
+        `email` and `org` are only populated when PANE_ACCOUNT=full, so the
         default panel leaks nothing beyond a first name.
         """
         conf = self._config()
@@ -151,7 +151,7 @@ class Account:
         oauth = conf.get("oauthAccount")
         if not isinstance(oauth, dict):
             return None
-        full = os.environ.get("CBM_ACCOUNT", "").lower() == "full"
+        full = os.environ.get("PANE_ACCOUNT", "").lower() == "full"
         name = oauth.get("displayName") or ""
         email = oauth.get("emailAddress") or ""
         if not name and email:

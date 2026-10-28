@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Live, change-driven ccusage readout for one Claude Code session.
+# Live, change-driven usage readout for one Claude Code session.
 # Usage: watch.sh <session-id> [transcript-path] [poll-seconds]
 #
 # Cheaply stats this session's transcript every <poll> seconds and only runs
-# ccusage when the file actually changed -> near-live but idle-cheap.
+# when the file actually changed -> near-live but idle-cheap.
 # Run as its own program (the terminal execs a script path, not a shell loop).
 
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/../lib/common.sh"
-cbm_fix_path
+pane_fix_path
 
 sid="$1"
 transcript="$2"
@@ -16,15 +16,15 @@ poll="${3:-3}"
 mode="${4:-manual}"   # 'auto' = opened by the SessionStart hook
 case "$poll" in ''|*[!0-9]*) poll=3 ;; esac
 [ "$poll" -lt 1 ] && poll=1
-py="$(cbm_python)"
-ccu="$(cbm_ccusage)"
+py="$(pane_python)"
+ccu="$(pane_ccusage)"
 
 # Ctrl-C drops to an interactive shell instead of closing the pane.
-trap 'cbm_exec_shell' INT
+trap 'pane_exec_shell' INT
 
 if [ -z "$sid" ]; then
-  echo "ccusage-backpack-monitor: no session id passed; opening a shell."
-  cbm_exec_shell
+  echo "pane: no session id passed; opening a shell."
+  pane_exec_shell
 fi
 
 # The panel reads transcripts directly, so python3 alone is enough. Only when
@@ -32,9 +32,9 @@ fi
 # missing is there no data source at all.
 if [ -z "$py" ] && [ -z "$ccu" ]; then
   clear
-  cbm_no_source_msg
+  pane_no_source_msg
   printf '\n  (this pane is now a shell — paste a command above to fix it)\n\n'
-  cbm_exec_shell
+  pane_exec_shell
 fi
 
 gray() { printf '\033[90m%s\033[0m\n' "$1"; }
@@ -67,11 +67,11 @@ unset LINES COLUMNS
 # screen, so nothing can be banked. Everything here is now just etiquette:
 # borrow a buffer, hide the cursor, and hand both back on the way out.
 #
-# CBM_ALTSCREEN=0 opts out of the buffer; that path drops scrollback explicitly
+# PANE_ALTSCREEN=0 opts out of the buffer; that path drops scrollback explicitly
 # (\033[3J AFTER the erase, or it drops everything but the frame just banked).
 # ---------------------------------------------------------------------------
 altscreen=0
-if [ "${CBM_ALTSCREEN:-1}" != "0" ] && [ -t 1 ] &&
+if [ "${PANE_ALTSCREEN:-1}" != "0" ] && [ -t 1 ] &&
    [ -n "${TERM:-}" ] && [ "${TERM:-}" != dumb ]; then
   altscreen=1
 fi
@@ -118,7 +118,7 @@ screen_reset() {
 }
 
 # exec replaces this process, so the EXIT trap never runs on that path.
-shell_out() { screen_leave; cbm_exec_shell; }
+shell_out() { screen_leave; pane_exec_shell; }
 
 locate() {
   if [ -n "$transcript" ] && [ -f "$transcript" ]; then return; fi
@@ -136,7 +136,7 @@ ntabs=6
 # tty test `read` would fail instantly instead of blocking, turning the poll
 # into a busy loop -- the exact opposite of this tool's promise.
 interactive=0
-if [ "${CBM_TABS:-1}" != "0" ] && [ -t 0 ]; then interactive=1; fi
+if [ "${PANE_TABS:-1}" != "0" ] && [ -t 0 ]; then interactive=1; fi
 
 # Rich python panel when available; otherwise fall back to plain ccusage output.
 #
@@ -151,7 +151,7 @@ render() {
   fi
   [ -n "$ccu" ] || return 0
   screen_reset
-  eval "$ccu session -i $(cbm_shq "$sid")" 2>&1
+  eval "$ccu session -i $(pane_shq "$sid")" 2>&1
   gray ""
   gray "session ${sid:0:8}  |  live (updates on change)  |  Ctrl-C to stop"
 }
@@ -189,14 +189,14 @@ read_key() {
 # Change signature: the session transcript PLUS the directory its subagents
 # write into. During a workflow fan-out the main transcript can sit still for
 # minutes while agents spend money, so watching it alone would freeze the panel.
-# Uses cbm_stat_sig so it stays portable across GNU and BSD stat.
+# Uses pane_stat_sig so it stays portable across GNU and BSD stat.
 signature() {
   local agents="${transcript%.jsonl}/subagents" f
-  cbm_stat_sig "$transcript"
+  pane_stat_sig "$transcript"
   if [ -d "$agents" ]; then
     # -newer than the transcript would miss idle agents; just fold them all in.
     find "$agents" -name '*.jsonl' -print 2>/dev/null | while IFS= read -r f; do
-      cbm_stat_sig "$f"
+      pane_stat_sig "$f"
     done
   fi
 }
@@ -223,7 +223,7 @@ screen_reset
 # take effect in a pane that is already running, no matter what is on disk.
 # That is not a footnote: it is why two fixes for the ghost frame above looked
 # like they had failed. Notice our own file changing and re-exec into it.
-self_sig="$(cbm_stat_sig "$0" 2>/dev/null)"
+self_sig="$(pane_stat_sig "$0" 2>/dev/null)"
 
 # Sentinel (not "") so the first iteration always renders — and so a host where
 # stat yields no signature still renders once before idling, rather than never.
@@ -257,14 +257,14 @@ while true; do
   # consecutive misses before acting, so a registry that briefly does not list
   # us -- a resume, a rewritten entry -- cannot retire a live pane.
   retire_ticks=$((retire_ticks + 1))
-  if [ "$retire_ticks" -ge "${CBM_RETIRE_CHECK:-20}" ]; then
+  if [ "$retire_ticks" -ge "${PANE_RETIRE_CHECK:-20}" ]; then
     retire_ticks=0
-    cbm_session_is_live "$sid"
+    pane_session_is_live "$sid"
     if [ $? = 1 ]; then
       retire_misses=$((retire_misses + 1))
       if [ "$retire_misses" -ge 3 ]; then
         screen_leave
-        cbm_close_own_pane "$sid"
+        pane_close_own "$sid"
         exit 0
       fi
     else
@@ -277,8 +277,8 @@ while true; do
   # Once the file has content the answer is unambiguous, so an auto-opened pane
   # retires itself here. Only 'auto' panes do this — a pane the user asked for
   # stays put and says whose agent it is, which is the existing behaviour.
-  if [ "$mode" = auto ] && cbm_is_agent_session "$transcript"; then
-    cbm_close_own_pane "$sid"
+  if [ "$mode" = auto ] && pane_is_agent_session "$transcript"; then
+    pane_close_own "$sid"
     exit 0
   fi
 
@@ -297,7 +297,7 @@ while true; do
     # under us) simply means carry on. We do NOT leave the alternate screen
     # first: the successor re-enters it immediately, and switching out and back
     # is itself a frame the terminal could bank.
-    new_sig="$(cbm_stat_sig "$0" 2>/dev/null)"
+    new_sig="$(pane_stat_sig "$0" 2>/dev/null)"
     if [ -n "$new_sig" ] && [ -n "$self_sig" ] && [ "$new_sig" != "$self_sig" ] &&
        [ -s "$0" ] && "${BASH:-bash}" -n "$0" 2>/dev/null; then
       exec "${BASH:-bash}" "$0" "$@"
@@ -305,7 +305,7 @@ while true; do
     # The key list is a one-shot: shown on the render right after `?`, gone on
     # the next one, so it can never become clutter in a 25%-width pane.
     if [ "$help_once" = 1 ]; then
-      CBM_HELP=1 render
+      PANE_HELP=1 render
       help_once=0
     else
       render

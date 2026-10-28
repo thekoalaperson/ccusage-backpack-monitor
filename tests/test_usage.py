@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LIB = os.path.join(HERE, "..", "lib")
 sys.path.insert(0, LIB)
 
-os.environ["CBM_NO_NETWORK"] = "1"   # tests must never hit the network
+os.environ["PANE_NO_NETWORK"] = "1"   # tests must never hit the network
 
 from pricing import Pricing          # noqa: E402
 import usage as usage_mod            # noqa: E402
@@ -42,7 +42,7 @@ def write(path, rows):
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="cbm-test-")
+        self.tmp = tempfile.mkdtemp(prefix="pane-test-")
         # Redirect all state (scan cache, pricing snapshot) into the sandbox.
         os.environ["XDG_STATE_HOME"] = os.path.join(self.tmp, "state")
         os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
@@ -161,7 +161,7 @@ class TestPricing(Base):
         self.assertEqual(self.pricing.context_window("claude-brandnew-9"), 200000)
 
     def test_user_override_wins(self):
-        cfg = os.path.join(self.tmp, "config", "ccusage-backpack-monitor")
+        cfg = os.path.join(self.tmp, "config", "pane")
         os.makedirs(cfg, exist_ok=True)
         with open(os.path.join(cfg, "pricing.json"), "w") as f:
             json.dump({"claude-opus-5": {"input": 99.0, "output": 1.0}}, f)
@@ -278,7 +278,7 @@ class TestScanner(Base):
                     "bulk%d" % i, [msg("claude-opus-5", "m%d" % i, out=1000)]))
             self.scan.save()
             with open(os.path.join(self.tmp, "state",
-                                   "ccusage-backpack-monitor", "scan-cache.json")) as f:
+                                   "pane", "scan-cache.json")) as f:
                 saved = json.load(f)
             self.assertLessEqual(len(saved["files"]), 5)
         finally:
@@ -324,7 +324,7 @@ class TestActiveBlock(Base):
 class TestRender(Base):
     def _run(self, sid, transcript, env=None):
         e = dict(os.environ)
-        e["CBM_NO_NETWORK"] = "1"
+        e["PANE_NO_NETWORK"] = "1"
         e.update(env or {})
         r = subprocess.run([sys.executable, os.path.join(LIB, "render.py"), sid, transcript],
                            capture_output=True, text=True, env=e)
@@ -393,7 +393,7 @@ class TestRender(Base):
         self.assertIn("$25.00", r.stdout)      # content still present
 
     def test_no_line_overflows_pane_width(self):
-        """A narrow pane must degrade, not wrap. CBM_SIZE=25 makes this common."""
+        """A narrow pane must degrade, not wrap. PANE_SIZE=25 makes this common."""
         import unicodedata
         sid = "abc12345-0000-0000-0000-000000000000"
         path = os.path.join(self.projects, "proj", sid + ".jsonl")
@@ -422,7 +422,7 @@ class TestRender(Base):
         write(path, [msg("claude-fable-5", "m1", out=1_000_000)])
         write(os.path.join(self.projects, "proj", sid, "subagents", "agent-a.jsonl"),
               [msg("claude-sonnet-5", "s1", out=1_000_000)])
-        r = self._run(sid, path, {"CBM_AGENTS": "0", "CBM_GRAPH": "0", "CBM_BLOCKS": "0"})
+        r = self._run(sid, path, {"PANE_AGENTS": "0", "PANE_GRAPH": "0", "PANE_BLOCKS": "0"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("AGENTS", r.stdout)
         self.assertNotIn("out/turn", r.stdout)
@@ -634,7 +634,7 @@ class TestAgentLabelling(Base):
                    "teamName": "session-" + parent[:8]},
                   msg("claude-sonnet-5", "a1", out=1_000_000)])
         e = dict(os.environ)
-        e["CBM_NO_NETWORK"] = "1"
+        e["PANE_NO_NETWORK"] = "1"
         e["COLUMNS"] = "60"
         r = subprocess.run([sys.executable, os.path.join(LIB, "render.py"),
                             "agent-strays", p], capture_output=True, text=True, env=e)
@@ -650,21 +650,21 @@ class TestToggle(Base):
     Runs against a mocked backend so no real terminal panes are created.
     """
 
-    # No `set -e`: cbm_toggle_pane signals outcomes through non-zero exit codes
+    # No `set -e`: pane_toggle signals outcomes through non-zero exit codes
     # (3 = closed, 4 = restarted), which are successes, not failures.
     HARNESS = r'''
 . "%(lib)s/common.sh"
-# `iterm` (a real backend id) so cbm_state_backend/cbm_state_handle parse the
+# `iterm` (a real backend id) so pane_state_backend/pane_state_handle parse the
 # state file for real; an unrecognised id degrades to legacy single-line mode.
-cbm_backend()     { printf iterm; }
-cbm_dispatch_ok() { return 0; }
-cbm_open_iterm()  { printf 'HANDLE-NEW'; }
-cbm_alive_iterm() { [ -n "$1" ]; }
-cbm_close_iterm() { return 0; }
-cbm_pane_alive()  { cbm_alive_iterm "$1"; }
-cbm_pane_close()  { return 0; }
+pane_backend()     { printf iterm; }
+pane_dispatch_ok() { return 0; }
+pane_open_iterm()  { printf 'HANDLE-NEW'; }
+pane_alive_iterm() { [ -n "$1" ]; }
+pane_close_iterm() { return 0; }
+pane_alive()  { pane_alive_iterm "$1"; }
+pane_close()  { return 0; }
 sid=testsess; trans=/tmp/x.jsonl
-f="$(cbm_state_dir)/$sid.pane"
+f="$(pane_state_dir)/$sid.pane"
 %(body)s
 '''
 
@@ -680,9 +680,9 @@ f="$(cbm_state_dir)/$sid.pane"
 
     def test_open_then_close_then_open(self):
         out, r = self._sh('''
-cbm_toggle_pane "$sid" "$trans"; echo "rc1=$?"
-cbm_toggle_pane "$sid" "$trans"; echo "rc2=$?"
-cbm_toggle_pane "$sid" "$trans"; echo "rc3=$?"
+pane_toggle "$sid" "$trans"; echo "rc1=$?"
+pane_toggle "$sid" "$trans"; echo "rc2=$?"
+pane_toggle "$sid" "$trans"; echo "rc3=$?"
 ''')
         self.assertIn("rc1=0", out, r.stderr)   # opened
         self.assertIn("rc2=3", out, r.stderr)   # closed
@@ -692,8 +692,8 @@ cbm_toggle_pane "$sid" "$trans"; echo "rc3=$?"
         """A pane launched by an older plugin version must be replaced, not closed."""
         out, r = self._sh('''
 printf 'iterm\\nHANDLE-OLD\\n/some/old/plugin/0.7.0\\n' > "$f"
-cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
-echo "root=$(cbm_state_root "$f")"
+pane_toggle "$sid" "$trans"; echo "rc=$?"
+echo "root=$(pane_state_root "$f")"
 ''')
         self.assertIn("rc=4", out, r.stderr)
         self.assertNotIn("/some/old/plugin/0.7.0", out)
@@ -702,15 +702,15 @@ echo "root=$(cbm_state_root "$f")"
         """State files written before version stamping have no root -> refresh."""
         out, r = self._sh('''
 printf 'iterm\\nHANDLE-LEGACY\\n' > "$f"
-cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+pane_toggle "$sid" "$trans"; echo "rc=$?"
 ''')
         self.assertIn("rc=4", out, r.stderr)
 
     def test_state_file_records_plugin_root(self):
         out, r = self._sh('''
-cbm_toggle_pane "$sid" "$trans" >/dev/null
+pane_toggle "$sid" "$trans" >/dev/null
 echo "lines=$(wc -l < "$f" | tr -d ' ')"
-echo "root=$(cbm_state_root "$f")"
+echo "root=$(pane_state_root "$f")"
 ''')
         self.assertIn("lines=4", out, r.stderr)   # + the owning session's pid
         self.assertIn("root=%s" % os.path.abspath(os.path.join(LIB, "..")), out)
@@ -730,9 +730,9 @@ echo "root=$(cbm_state_root "$f")"
                 "teamName": "session-testsess"},
                msg("claude-sonnet-5", "a1", out=1000)])
         out, r = self._sh('''
-printf 'iterm\\nHANDLE-ORPHAN\\n/old/0.8.0\\n' > "$(cbm_state_dir)/%s.pane"
-cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
-ls "$(cbm_state_dir)" | grep -c pane | sed 's/^/panes=/'
+printf 'iterm\\nHANDLE-ORPHAN\\n/old/0.8.0\\n' > "$(pane_state_dir)/%s.pane"
+pane_toggle "$sid" "$trans"; echo "rc=$?"
+ls "$(pane_state_dir)" | grep -c pane | sed 's/^/panes=/'
 ''' % agent_sid, home=self.tmp)
         self.assertIn("rc=4", out, r.stderr)     # cleaned up + reopened
         self.assertIn("panes=1", out, r.stderr)  # exactly one pane remains
@@ -756,10 +756,10 @@ ps() { case "$*" in *comm*) echo claude ;; *) command ps "$@" ;; esac; }
         can reach a pane with no record. So the record outlives a failed close.
         """
         out, r = self._sh('''
-cbm_close_iterm() { return 0; }          # "succeeds", but the pane stays
-cbm_alive_iterm() { return 0; }
-printf 'iterm\\nHANDLE-STUCK\\n%s\\n\\n' "$(cbm_plugin_root)" > "$f"
-cbm_close_recorded_pane "$f"; echo "rc=[$?]"
+pane_close_iterm() { return 0; }          # "succeeds", but the pane stays
+pane_alive_iterm() { return 0; }
+printf 'iterm\\nHANDLE-STUCK\\n%s\\n\\n' "$(pane_plugin_root)" > "$f"
+pane_close_recorded "$f"; echo "rc=[$?]"
 [ -f "$f" ] && echo "record=kept" || echo "record=LOST"
 ''')
         self.assertIn("rc=[1]", out, r.stderr)
@@ -767,9 +767,9 @@ cbm_close_recorded_pane "$f"; echo "rc=[$?]"
 
     def test_a_successful_close_forgets_the_pane(self):
         out, r = self._sh('''
-printf 'iterm\\nHANDLE-GOING\\n%s\\n\\n' "$(cbm_plugin_root)" > "$f"
-cbm_alive_iterm() { return 1; }          # gone after the close
-cbm_close_recorded_pane "$f"; echo "rc=[$?]"
+printf 'iterm\\nHANDLE-GOING\\n%s\\n\\n' "$(pane_plugin_root)" > "$f"
+pane_alive_iterm() { return 1; }          # gone after the close
+pane_close_recorded "$f"; echo "rc=[$?]"
 [ -f "$f" ] && echo "record=kept" || echo "record=gone"
 ''')
         self.assertIn("rc=[0]", out, r.stderr)
@@ -779,14 +779,14 @@ cbm_close_recorded_pane "$f"; echo "rc=[$?]"
         """Older Claude Code keeps no ~/.claude/sessions. Reading "no entry"
         as "ended" there would retire every pane on the machine."""
         out, r = self._sh('''
-cbm_session_is_live "whatever"; echo "rc=$?"
+pane_session_is_live "whatever"; echo "rc=$?"
 ''', home=self.tmp)
         self.assertIn("rc=2", out, r.stderr)      # unknown, not ended
 
     def test_a_session_missing_from_a_live_registry_has_ended(self):
         out, r = self._sh(self.NEIGHBOUR + '''
-cbm_session_is_live "neighbour-session"; echo "live=$?"
-cbm_session_is_live "long-gone-session"; echo "gone=$?"
+pane_session_is_live "neighbour-session"; echo "live=$?"
+pane_session_is_live "long-gone-session"; echo "gone=$?"
 ''', home=self.tmp)
         self.assertIn("live=0", out, r.stderr)
         self.assertIn("gone=1", out, r.stderr)
@@ -804,8 +804,8 @@ cbm_session_is_live "long-gone-session"; echo "gone=$?"
 mkdir -p "$HOME/.claude/sessions"
 printf '{"pid":%s,"sessionId":"mine-0000-0000"}' "$$" > "$HOME/.claude/sessions/$$.json"
 ps() { case "$*" in *comm*) echo claude ;; *) command ps "$@" ;; esac; }
-echo "sid=$(cbm_owner_sid)"
-echo "pid=$(cbm_owner_pid)/$$"
+echo "sid=$(pane_owner_sid)"
+echo "pid=$(pane_owner_pid)/$$"
 ''', home=self.tmp)
         self.assertIn("sid=mine-0000-0000", out, r.stderr)
 
@@ -817,8 +817,8 @@ echo "pid=$(cbm_owner_pid)/$$"
         their state file, or open a monitor onto their session.
         """
         out, r = self._sh(self.NEIGHBOUR + '''
-printf 'iterm\\nHANDLE-THEIRS\\n%s\\n4242\\n' "$(cbm_plugin_root)" > "$f"
-cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+printf 'iterm\\nHANDLE-THEIRS\\n%s\\n4242\\n' "$(pane_plugin_root)" > "$f"
+pane_toggle "$sid" "$trans"; echo "rc=$?"
 grep -q HANDLE-THEIRS "$f" && echo "theirs=kept" || echo "theirs=LOST"
 ''', home=self.tmp)
         self.assertIn("rc=5", out, r.stderr)          # left alone, said so
@@ -828,10 +828,10 @@ grep -q HANDLE-THEIRS "$f" && echo "theirs=kept" || echo "theirs=LOST"
         """Panes are also forgotten by age. A live session's never is: losing
         the handle leaves them a monitor they can no longer toggle off."""
         out, r = self._sh(self.NEIGHBOUR + '''
-theirs="$(cbm_state_dir)/neighbour-session.pane"
-printf 'iterm\\nHANDLE-THEIRS\\n%s\\n4242\\n' "$(cbm_plugin_root)" > "$theirs"
+theirs="$(pane_state_dir)/neighbour-session.pane"
+printf 'iterm\\nHANDLE-THEIRS\\n%s\\n4242\\n' "$(pane_plugin_root)" > "$theirs"
 touch -t 200001010000 "$theirs"
-cbm_toggle_pane "$sid" "$trans" >/dev/null; echo "rc=$?"
+pane_toggle "$sid" "$trans" >/dev/null; echo "rc=$?"
 [ -f "$theirs" ] && echo "theirs=kept" || echo "theirs=SWEPT"
 ''', home=self.tmp)
         self.assertIn("theirs=kept", out, r.stderr)
@@ -840,37 +840,37 @@ cbm_toggle_pane "$sid" "$trans" >/dev/null; echo "rc=$?"
         """The guard protects live neighbours, not abandoned panes — otherwise
         every pane left by a session that has since quit would be untouchable."""
         out, r = self._sh('''
-printf 'iterm\\nHANDLE-ORPHAN\\n%s\\n999999\\n' "$(cbm_plugin_root)" > "$f"
-cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+printf 'iterm\\nHANDLE-ORPHAN\\n%s\\n999999\\n' "$(pane_plugin_root)" > "$f"
+pane_toggle "$sid" "$trans"; echo "rc=$?"
 ''', home=self.tmp)
         self.assertIn("rc=3", out, r.stderr)          # ours to close
 
     def test_other_sessions_panes_are_left_alone(self):
         """Several Claude sessions run side by side; don't close their monitors."""
         out, r = self._sh('''
-printf 'iterm\\nHANDLE-OTHER\\n%s\\n' "$(cbm_plugin_root)" > "$(cbm_state_dir)/other-session.pane"
-cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
-[ -f "$(cbm_state_dir)/other-session.pane" ] && echo "other=kept" || echo "other=CLOSED"
+printf 'iterm\\nHANDLE-OTHER\\n%s\\n' "$(pane_plugin_root)" > "$(pane_state_dir)/other-session.pane"
+pane_toggle "$sid" "$trans"; echo "rc=$?"
+[ -f "$(pane_state_dir)/other-session.pane" ] && echo "other=kept" || echo "other=CLOSED"
 ''')
         self.assertIn("rc=0", out, r.stderr)     # opened ours
         self.assertIn("other=kept", out, r.stderr)
 
     def test_dead_state_files_are_pruned(self):
         out, r = self._sh('''
-cbm_alive_iterm() { case "$1" in HANDLE-DEAD*) return 1 ;; *) [ -n "$1" ] ;; esac; }
-printf 'iterm\\nHANDLE-DEAD-1\\n%s\\n' "$(cbm_plugin_root)" > "$(cbm_state_dir)/gone-one.pane"
-printf 'iterm\\nHANDLE-DEAD-2\\n%s\\n' "$(cbm_plugin_root)" > "$(cbm_state_dir)/gone-two.pane"
-cbm_session_panes "$sid" >/dev/null
-ls "$(cbm_state_dir)" 2>/dev/null | grep -c pane | sed 's/^/left=/'
+pane_alive_iterm() { case "$1" in HANDLE-DEAD*) return 1 ;; *) [ -n "$1" ] ;; esac; }
+printf 'iterm\\nHANDLE-DEAD-1\\n%s\\n' "$(pane_plugin_root)" > "$(pane_state_dir)/gone-one.pane"
+printf 'iterm\\nHANDLE-DEAD-2\\n%s\\n' "$(pane_plugin_root)" > "$(pane_state_dir)/gone-two.pane"
+pane_session_list "$sid" >/dev/null
+ls "$(pane_state_dir)" 2>/dev/null | grep -c pane | sed 's/^/left=/'
 ''')
         self.assertIn("left=0", out, r.stderr)
 
     def test_dead_pane_reopens_rather_than_toggling_off(self):
         """If the recorded pane is gone (crash, manual close), open a fresh one."""
         out, r = self._sh('''
-cbm_alive_iterm() { return 1; }
-printf 'iterm\\nHANDLE-DEAD\\n%s\\n' "$(cbm_plugin_root)" > "$f"
-cbm_toggle_pane "$sid" "$trans"; echo "rc=$?"
+pane_alive_iterm() { return 1; }
+printf 'iterm\\nHANDLE-DEAD\\n%s\\n' "$(pane_plugin_root)" > "$f"
+pane_toggle "$sid" "$trans"; echo "rc=$?"
 ''')
         self.assertIn("rc=0", out, r.stderr)
 
@@ -940,7 +940,7 @@ exit 0
         e = dict(os.environ)
         for v in ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_BIN_PATH", "TMUX",
                   "TMUX_PANE", "WEZTERM_PANE", "TERM_PROGRAM",
-                  "ORCA_TERMINAL_HANDLE", "ITERM_SESSION_ID", "CBM_BACKEND"):
+                  "ORCA_TERMINAL_HANDLE", "ITERM_SESSION_ID", "PANE_BACKEND"):
             e.pop(v, None)
         e["XDG_STATE_HOME"] = os.path.join(self.tmp, "state")
         e["HERDR_BIN_PATH"] = self.fake
@@ -967,7 +967,7 @@ exit 0
 
     def test_herdr_outranks_the_terminal_it_runs_inside(self):
         """The whole bug: herdr inside iTerm2 is still herdr, not iTerm2."""
-        out, r = self._sh('cbm_backend; echo',
+        out, r = self._sh('pane_backend; echo',
                           HERDR_ENV="1", HERDR_PANE_ID="w1:p1",
                           TERM_PROGRAM="iTerm.app")
         self.assertEqual(out, "herdr", r.stderr)
@@ -980,28 +980,28 @@ exit 0
         in sight, where splitting on that stale id lands the monitor in an
         unrelated pane. With both set, the tmux pane is where Claude is.
         """
-        out, r = self._sh('cbm_backend; echo',
+        out, r = self._sh('pane_backend; echo',
                           HERDR_ENV="1", HERDR_PANE_ID="w1:p1",
                           TMUX="/x", TERM_PROGRAM="iTerm.app")
         self.assertEqual(out, "tmux", r.stderr)
 
     def test_herdr_inside_tmux_is_the_nesting_you_must_force(self):
-        out, r = self._sh('cbm_backend; echo',
-                          CBM_BACKEND="herdr", HERDR_ENV="1",
+        out, r = self._sh('pane_backend; echo',
+                          PANE_BACKEND="herdr", HERDR_ENV="1",
                           HERDR_PANE_ID="w1:p1", TMUX="/x")
         self.assertEqual(out, "herdr", r.stderr)
 
     def test_without_a_pane_id_herdr_is_not_claimed(self):
         """HERDR_PANE_ID is what makes the answer authoritative — it is injected
         per pane. Without one there is nothing to split from."""
-        out, r = self._sh('cbm_backend; echo',
+        out, r = self._sh('pane_backend; echo',
                           HERDR_ENV="1", HERDR_PANE_ID=None, TMUX="/x")
         self.assertEqual(out, "tmux", r.stderr)
 
-    def test_cbm_backend_override_still_wins(self):
+    def test_pane_backend_override_still_wins(self):
         """Someone running tmux inside a herdr pane wants the tmux split."""
-        out, r = self._sh('cbm_backend; echo',
-                          CBM_BACKEND="tmux", HERDR_ENV="1",
+        out, r = self._sh('pane_backend; echo',
+                          PANE_BACKEND="tmux", HERDR_ENV="1",
                           HERDR_PANE_ID="w1:p1", TMUX="/x")
         self.assertEqual(out, "tmux", r.stderr)
 
@@ -1012,16 +1012,16 @@ exit 0
         single-line iTerm record, so a herdr pane would have been closed by
         AppleScript with the handle 'herdr'."""
         out, r = self._sh(r'''
-f="$(cbm_state_dir)/s.pane"
+f="$(pane_state_dir)/s.pane"
 printf 'herdr\nw1:p4\n/root\n123\n' > "$f"
-echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
+echo "be=$(pane_state_backend "$f") h=$(pane_state_handle "$f")"
 ''')
         self.assertIn("be=herdr h=w1:p4", out, r.stderr)
 
     # -- open ---------------------------------------------------------------
 
     def test_open_splits_runs_and_labels(self):
-        out, r = self._sh('cbm_open_herdr "/bin/watch.sh a b" vertically 25 abcd1234ef',
+        out, r = self._sh('pane_open_herdr "/bin/watch.sh a b" vertically 25 abcd1234ef',
                           HERDR_ENV="1", HERDR_PANE_ID="w1:p1")
         self.assertEqual(out, "w1:p4", r.stderr)
         log = self._log().splitlines()
@@ -1035,10 +1035,10 @@ echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
         self.assertIn("--ratio 0.75", log[0])
         # exec: the watcher becomes the pane's process, so the pane closes with it
         self.assertIn("pane run w1:p4 exec /bin/watch.sh a b", log[1])
-        self.assertIn("pane rename w1:p4 ccusage abcd1234", log[2])
+        self.assertIn("pane rename w1:p4 pane abcd1234", log[2])
 
     def test_horizontal_split_maps_to_down(self):
-        out, r = self._sh('cbm_open_herdr "cmd" horizontally 40 sid',
+        out, r = self._sh('pane_open_herdr "cmd" horizontally 40 sid',
                           HERDR_ENV="1", HERDR_PANE_ID="w1:p1")
         self.assertEqual(out, "w1:p4", r.stderr)
         self.assertIn("--direction down", self._log())
@@ -1047,13 +1047,13 @@ echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
     def test_a_pane_that_cannot_be_driven_is_closed_again(self):
         """Never leak an empty pane: nothing would record it, so nothing could
         ever close it."""
-        out, r = self._sh('cbm_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
+        out, r = self._sh('pane_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
                           HERDR_ENV="1", HERDR_PANE_ID="w1:p1", FAKE_RUN_FAILS="1")
         self.assertIn("rc=1", out, r.stderr)
         self.assertIn("pane close w1:p4", self._log())
 
     def test_a_failed_split_opens_nothing(self):
-        out, r = self._sh('cbm_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
+        out, r = self._sh('pane_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
                           HERDR_ENV="1", HERDR_PANE_ID="w1:p1", FAKE_SPLIT_FAILS="1")
         self.assertIn("rc=1", out, r.stderr)
         self.assertNotIn("pane run", self._log())
@@ -1062,8 +1062,8 @@ echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
 
     def test_alive_is_the_cli_exit_status(self):
         out, r = self._sh('''
-cbm_alive_herdr w1:p4;  echo "live=$?"
-cbm_alive_herdr w1:p99; echo "dead=$?"
+pane_alive_herdr w1:p4;  echo "live=$?"
+pane_alive_herdr w1:p99; echo "dead=$?"
 ''')
         self.assertIn("live=0", out, r.stderr)
         self.assertIn("dead=1", out, r.stderr)
@@ -1073,8 +1073,8 @@ cbm_alive_herdr w1:p99; echo "dead=$?"
         argument — validate the `w<id>:p<id>` shape first, always."""
         out, r = self._sh(r'''
 for h in "; rm -rf /" "w1" "" "w1:p4 extra" "w1:x:p4" "-w1:p4" "w1:p4/../x"; do
-  cbm_alive_herdr "$h"; printf 'alive=%s ' "$?"
-  cbm_close_herdr "$h"; printf 'close=%s\n' "$?"
+  pane_alive_herdr "$h"; printf 'alive=%s ' "$?"
+  pane_close_herdr "$h"; printf 'close=%s\n' "$?"
 done
 ''')
         self.assertEqual(out.splitlines(),
@@ -1090,8 +1090,8 @@ done
         letter in it, which stranded the pane it had just created.
         """
         out, r = self._sh('''
-cbm_open_herdr "cmd" vertically 25 sid; echo "rc=$?"
-cbm_alive_herdr w1:pA; echo "alive=$?"
+pane_open_herdr "cmd" vertically 25 sid; echo "rc=$?"
+pane_alive_herdr w1:pA; echo "alive=$?"
 ''', HERDR_ENV="1", HERDR_PANE_ID="w1:pA", FAKE_PANE_ID="w2:pB",
      FAKE_ALIVE="w2:pB w1:pA")
         self.assertIn("w2:pB", out, r.stderr)
@@ -1111,7 +1111,7 @@ cbm_alive_herdr w1:pA; echo "alive=$?"
                             ("unusable id", {"FAKE_PANE_ID": "not a pane id"})):
             with self.subTest(label):
                 open(self.log, "w").close()
-                out, r = self._sh('cbm_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
+                out, r = self._sh('pane_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
                                   HERDR_ENV="1", HERDR_PANE_ID="w1:p1", **over)
                 self.assertIn("rc=1", out, r.stderr)
                 self.assertEqual(self._calls("pane split"), 1, self._log())
@@ -1120,7 +1120,7 @@ cbm_alive_herdr w1:pA; echo "alive=$?"
     def test_only_a_failed_split_command_is_retried(self):
         """An older herdr rejects --ratio and creates no pane at all — that is
         the one case worth a second attempt, and it drops only that flag."""
-        out, r = self._sh('cbm_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
+        out, r = self._sh('pane_open_herdr "cmd" vertically 25 sid; echo "rc=$?"',
                           HERDR_ENV="1", HERDR_PANE_ID="w1:p1", FAKE_SPLIT_FAILS="1")
         self.assertIn("rc=1", out, r.stderr)                 # the fake fails both
         self.assertEqual(self._calls("pane split"), 2, self._log())
@@ -1130,20 +1130,20 @@ cbm_alive_herdr w1:pA; echo "alive=$?"
         self.assertIn("--direction right", splits[1])        # only --ratio is dropped
 
     def test_the_size_percentage_is_read_in_base_ten(self):
-        """`CBM_SIZE=08` is an octal literal to bash: the arithmetic errors onto
+        """`PANE_SIZE=08` is an octal literal to bash: the arithmetic errors onto
         the hook's stderr and yields nothing, leaving `--ratio 0.` — which herdr
         ACCEPTS, as 0.0, collapsing the session's own pane. `025` would quietly
-        have meant 21%. Both go through cbm_open_pane's clamp first, so this is
-        the real path, not cbm_open_herdr called by hand.
+        have meant 21%. Both go through pane_open's clamp first, so this is
+        the real path, not pane_open_herdr called by hand.
         """
         for size, ratio in (("08", "0.92"), ("025", "0.75"), ("25", "0.75")):
             with self.subTest(size):
                 open(self.log, "w").close()
                 # A fresh session id each time: the previous pane is still
-                # "alive" to the fake, and cbm_open_pane is idempotent.
-                out, r = self._sh('cbm_open_pane s%s /tmp/t.jsonl auto; echo "rc=$?"' % size,
+                # "alive" to the fake, and pane_open is idempotent.
+                out, r = self._sh('pane_open s%s /tmp/t.jsonl auto; echo "rc=$?"' % size,
                                   HERDR_ENV="1", HERDR_PANE_ID="w1:p1",
-                                  CBM_SIZE=size)
+                                  PANE_SIZE=size)
                 self.assertIn("rc=0", out, r.stderr)
                 # Whole flag, not a prefix: the bug produced a bare "0.", which
                 # `assertIn("--ratio 0.")` would happily have accepted.
@@ -1153,13 +1153,13 @@ cbm_alive_herdr w1:pA; echo "alive=$?"
     def test_the_split_does_not_set_a_cwd(self):
         """Nothing downstream reads it — watch.sh is invoked by absolute path —
         and the fallback split must differ from the first by --ratio alone."""
-        out, r = self._sh('cbm_open_herdr "cmd" vertically 25 sid',
+        out, r = self._sh('pane_open_herdr "cmd" vertically 25 sid',
                           HERDR_ENV="1", HERDR_PANE_ID="w1:p1")
         self.assertEqual(out, "w1:p4", r.stderr)
         self.assertNotIn("--cwd", self._log())
 
     def test_close_is_best_effort(self):
-        out, r = self._sh('cbm_close_herdr w1:p4; echo "rc=$?"')
+        out, r = self._sh('pane_close_herdr w1:p4; echo "rc=$?"')
         self.assertIn("rc=0", out, r.stderr)
         self.assertIn("pane close w1:p4", self._log())
 
@@ -1167,15 +1167,15 @@ cbm_alive_herdr w1:pA; echo "alive=$?"
 
     def test_open_pane_records_the_herdr_backend(self):
         out, r = self._sh(r'''
-cbm_open_pane sess-1 /tmp/t.jsonl auto; echo "rc=$?"
-cat "$(cbm_state_dir)/sess-1.pane"
+pane_open sess-1 /tmp/t.jsonl auto; echo "rc=$?"
+cat "$(pane_state_dir)/sess-1.pane"
 ''', HERDR_ENV="1", HERDR_PANE_ID="w1:p1")
         lines = out.splitlines()
         self.assertIn("rc=0", lines, r.stderr)
         self.assertEqual(lines[1], "herdr", out)
         self.assertEqual(lines[2], "w1:p4", out)
-        # The label carries the session id, which only cbm_open_pane knows.
-        self.assertIn("pane rename w1:p4 ccusage sess-1", self._log())
+        # The label carries the session id, which only pane_open knows.
+        self.assertIn("pane rename w1:p4 pane sess-1", self._log())
 
     def test_the_session_end_close_path_speaks_herdr(self):
         """SessionEnd is a fresh process: it closes via the RECORDED backend.
@@ -1186,9 +1186,9 @@ cat "$(cbm_state_dir)/sess-1.pane"
         "herdr" and left on screen forever.
         """
         out, r = self._sh(r'''
-f="$(cbm_state_dir)/s.pane"
-printf 'herdr\nw1:p4\n%s\n\n' "$(cbm_plugin_root)" > "$f"
-cbm_close_recorded_pane "$f"; echo "rc=$?"
+f="$(pane_state_dir)/s.pane"
+printf 'herdr\nw1:p4\n%s\n\n' "$(pane_plugin_root)" > "$f"
+pane_close_recorded "$f"; echo "rc=$?"
 [ -f "$f" ] && echo "record=kept" || echo "record=gone"
 ''')
         self.assertIn("rc=0", out, r.stderr)
@@ -1200,9 +1200,9 @@ cbm_close_recorded_pane "$f"; echo "rc=$?"
     def test_a_herdr_pane_that_will_not_close_keeps_its_record(self):
         """Forgetting it first would leave a pane nothing could ever name again."""
         out, r = self._sh(r'''
-f="$(cbm_state_dir)/s.pane"
-printf 'herdr\nw1:p4\n%s\n\n' "$(cbm_plugin_root)" > "$f"
-cbm_close_recorded_pane "$f"; echo "rc=$?"
+f="$(pane_state_dir)/s.pane"
+printf 'herdr\nw1:p4\n%s\n\n' "$(pane_plugin_root)" > "$f"
+pane_close_recorded "$f"; echo "rc=$?"
 [ -f "$f" ] && echo "record=kept" || echo "record=LOST"
 ''', FAKE_CLOSE_STICKS="1")
         self.assertIn("rc=1", out, r.stderr)
@@ -1211,8 +1211,8 @@ cbm_close_recorded_pane "$f"; echo "rc=$?"
 
     def test_open_pane_records_nothing_when_the_pane_cannot_run(self):
         out, r = self._sh(r'''
-cbm_open_pane sess-2 /tmp/t.jsonl auto; echo "rc=$?"
-[ -f "$(cbm_state_dir)/sess-2.pane" ] && echo "state=WRITTEN" || echo "state=none"
+pane_open sess-2 /tmp/t.jsonl auto; echo "rc=$?"
+[ -f "$(pane_state_dir)/sess-2.pane" ] && echo "state=WRITTEN" || echo "state=none"
 ''', HERDR_ENV="1", HERDR_PANE_ID="w1:p1", FAKE_RUN_FAILS="1")
         self.assertIn("rc=1", out, r.stderr)
         self.assertIn("state=none", out, r.stderr)
@@ -1233,7 +1233,7 @@ class TestOrcaBackend(Base):
     exits 0 for a pane that is already closed, which matters because closing a
     handle that has left the layout closes a DIFFERENT pane.
 
-    Every test runs against a fake `orca` executable pointed at by $CBM_ORCA_BIN,
+    Every test runs against a fake `orca` executable pointed at by $PANE_ORCA_BIN,
     so the suite never drives the real app.
     """
 
@@ -1331,10 +1331,10 @@ exit 0
         e = dict(os.environ)
         for v in ("TERM_PROGRAM", "ORCA_TERMINAL_HANDLE", "TMUX", "TMUX_PANE",
                   "HERDR_ENV", "HERDR_PANE_ID", "HERDR_BIN_PATH", "WEZTERM_PANE",
-                  "ITERM_SESSION_ID", "CBM_BACKEND", "CBM_ORCA_BIN"):
+                  "ITERM_SESSION_ID", "PANE_BACKEND", "PANE_ORCA_BIN"):
             e.pop(v, None)
         e["XDG_STATE_HOME"] = os.path.join(self.tmp, "state")
-        e["CBM_ORCA_BIN"] = self.fake
+        e["PANE_ORCA_BIN"] = self.fake
         for k, v in overrides.items():
             if v is None:
                 e.pop(k, None)
@@ -1370,18 +1370,18 @@ exit 0
     def test_orca_is_detected(self):
         """The bug this fixes: $TERM_PROGRAM=Orca matched nothing, so an Orca
         session got no monitor at all."""
-        out, r = self._sh('cbm_backend; echo', **self._in_orca())
+        out, r = self._sh('pane_backend; echo', **self._in_orca())
         self.assertEqual(out, "orca", r.stderr)
 
     def test_tmux_outranks_orca(self):
         """A tmux running inside an Orca pane owns the inner layout: an Orca
         split would land outside tmux's pane tree, where alive/close could never
         reconcile it."""
-        out, r = self._sh('cbm_backend; echo', **self._in_orca(TMUX="/x"))
+        out, r = self._sh('pane_backend; echo', **self._in_orca(TMUX="/x"))
         self.assertEqual(out, "tmux", r.stderr)
 
     def test_herdr_outranks_orca(self):
-        out, r = self._sh('cbm_backend; echo',
+        out, r = self._sh('pane_backend; echo',
                           **self._in_orca(HERDR_ENV="1", HERDR_PANE_ID="w1:p1"))
         self.assertEqual(out, "herdr", r.stderr)
 
@@ -1391,18 +1391,18 @@ exit 0
         launched from an Orca pane hands it to every window opened from it
         afterwards. So the detector declines outright when $TMUX is set, rather
         than relying on the ranking alone."""
-        out, r = self._sh('cbm_detect_orca; echo "rc=$?"', **self._in_orca(TMUX="/x"))
+        out, r = self._sh('pane_detect_orca; echo "rc=$?"', **self._in_orca(TMUX="/x"))
         self.assertIn("rc=1", out, r.stderr)
 
     def test_without_a_handle_orca_is_not_claimed(self):
         """The handle is what makes the answer authoritative — it is injected per
         pane. Without one there is nothing to split from."""
-        out, r = self._sh('cbm_backend; echo',
+        out, r = self._sh('pane_backend; echo',
                           TERM_PROGRAM="Orca", ORCA_TERMINAL_HANDLE=None, TMUX="/x")
         self.assertEqual(out, "tmux", r.stderr)
 
-    def test_cbm_backend_override_still_wins(self):
-        out, r = self._sh('cbm_backend; echo', **self._in_orca(CBM_BACKEND="iterm"))
+    def test_pane_backend_override_still_wins(self):
+        out, r = self._sh('pane_backend; echo', **self._in_orca(PANE_BACKEND="iterm"))
         self.assertEqual(out, "iterm", r.stderr)
 
     # -- state file ---------------------------------------------------------
@@ -1412,16 +1412,16 @@ exit 0
         single-line iTerm record, so an Orca pane would have been hunted for
         among iTerm2 sessions under the name 'orca'."""
         out, r = self._sh(r'''
-f="$(cbm_state_dir)/s.pane"
+f="$(pane_state_dir)/s.pane"
 printf 'orca\n%s\n/root\n123\n' > "$f"
-echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
+echo "be=$(pane_state_backend "$f") h=$(pane_state_handle "$f")"
 ''' % self.H)
         self.assertIn("be=orca h=%s" % self.H, out, r.stderr)
 
     # -- open ---------------------------------------------------------------
 
     def test_open_splits_bare_then_sends_then_refocuses(self):
-        out, r = self._sh('cbm_open_orca "/bin/watch.sh a b" vertically 25 abcd1234ef',
+        out, r = self._sh('pane_open_orca "/bin/watch.sh a b" vertically 25 abcd1234ef',
                           **self._in_orca())
         self.assertEqual(out, self.NEW, r.stderr)
         log = self._log().splitlines()
@@ -1440,7 +1440,7 @@ echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
                                  % self.H, log)
 
     def test_horizontal_split_maps_to_horizontal(self):
-        out, r = self._sh('cbm_open_orca "cmd" horizontally 40 sid', **self._in_orca())
+        out, r = self._sh('pane_open_orca "cmd" horizontally 40 sid', **self._in_orca())
         self.assertEqual(out, self.NEW, r.stderr)
         self.assertIn("[--direction][horizontal]", self._log())
 
@@ -1449,14 +1449,14 @@ echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
         out waiting for split pane handle" after a 10s hang, creating no pane.
         A bare split succeeded every time, so the watcher is typed in afterwards.
         """
-        out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid', **self._in_orca())
+        out, r = self._sh('pane_open_orca "cmd" vertically 25 sid', **self._in_orca())
         self.assertEqual(out, self.NEW, r.stderr)
         self.assertNotIn("[--command]", self._log())
 
     def test_the_pane_is_never_renamed(self):
         """`terminal rename` retitles the enclosing TAB as well as the leaf, so
         labelling the monitor would rename the user's own tab."""
-        out, r = self._sh('cbm_open_orca "cmd" vertically 25 abcd1234ef',
+        out, r = self._sh('pane_open_orca "cmd" vertically 25 abcd1234ef',
                           **self._in_orca())
         self.assertEqual(out, self.NEW, r.stderr)
         self.assertNotIn("[rename]", self._log())
@@ -1470,14 +1470,14 @@ echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
         it would replace the pane running Claude with the monitor, killing the
         session it was opened to watch. Well-formed is not the same as different.
         """
-        out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
+        out, r = self._sh('pane_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
                           **self._in_orca(FAKE_HANDLE=self.H))
         self.assertIn("rc=1", out, r.stderr)
         self.assertNotIn("[terminal][send]", self._log())
         self.assertEqual(self._verbs(), ["split"], self._log())
 
     def test_a_failed_split_opens_nothing(self):
-        out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
+        out, r = self._sh('pane_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
                           **self._in_orca(FAKE_SPLIT_FAILS="1"))
         self.assertIn("rc=1", out, r.stderr)
         self.assertNotIn("[terminal][send]", self._log())
@@ -1493,7 +1493,7 @@ echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
                             ("uppercase hex", {"FAKE_HANDLE": self.H.upper()})):
             with self.subTest(label):
                 open(self.log, "w").close()
-                out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
+                out, r = self._sh('pane_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
                                   **self._in_orca(**over))
                 self.assertIn("rc=1", out, r.stderr)
                 self.assertEqual(self._calls("split"), 1, self._log())
@@ -1503,22 +1503,22 @@ echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
     def test_a_pane_that_cannot_be_driven_is_closed_again(self):
         """Never leak an empty pane: nothing would record it, so nothing could
         ever close it."""
-        out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
+        out, r = self._sh('pane_open_orca "cmd" vertically 25 sid; echo "rc=$?"',
                           **self._in_orca(FAKE_SEND_FAILS="1"))
         self.assertIn("rc=1", out, r.stderr)
         self.assertIn("[terminal][close][--terminal][%s]" % self.NEW, self._log())
 
     def test_the_size_percentage_is_accepted_and_ignored(self):
         """Orca always splits 50/50 — there is no size, ratio or percent flag —
-        so CBM_SIZE cannot be honoured here. It must still not break the open,
+        so PANE_SIZE cannot be honoured here. It must still not break the open,
         and must not produce arithmetic noise on the hook's stderr."""
         for size in ("08", "025", "25", "90"):
             with self.subTest(size):
                 open(self.log, "w").close()
                 # A fresh session id each time: the previous pane is still
-                # "alive" to the fake, and cbm_open_pane is idempotent.
-                out, r = self._sh('cbm_open_pane s%s /tmp/t.jsonl auto; echo "rc=$?"' % size,
-                                  **self._in_orca(CBM_SIZE=size))
+                # "alive" to the fake, and pane_open is idempotent.
+                out, r = self._sh('pane_open s%s /tmp/t.jsonl auto; echo "rc=$?"' % size,
+                                  **self._in_orca(PANE_SIZE=size))
                 self.assertIn("rc=0", out, r.stderr)
                 self.assertEqual(r.stderr, "", "arithmetic noise on stderr")
                 for flag in ("[--size]", "[--percent]", "[--ratio]", size):
@@ -1527,10 +1527,10 @@ echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
     def test_refocus_can_be_turned_off(self):
         """Measured on 1.4.199: the split leaves the NEW pane active, and
         `terminal focus` on the parent handle re-activates Claude's leaf. Anyone
-        who would rather land in the monitor sets CBM_ORCA_REFOCUS=0, and then no
+        who would rather land in the monitor sets PANE_ORCA_REFOCUS=0, and then no
         focus call is made at all."""
-        out, r = self._sh('cbm_open_orca "cmd" vertically 25 sid',
-                          **self._in_orca(CBM_ORCA_REFOCUS="0"))
+        out, r = self._sh('pane_open_orca "cmd" vertically 25 sid',
+                          **self._in_orca(PANE_ORCA_REFOCUS="0"))
         self.assertEqual(out, self.NEW, r.stderr)
         self.assertNotIn("[terminal][focus]", self._log())
         self.assertEqual(self._verbs(), ["split", "send"], self._log())
@@ -1543,10 +1543,10 @@ echo "be=$(cbm_state_backend "$f") h=$(cbm_state_handle "$f")"
         call every dead pane alive — and then hand its handle to `close`."""
         out, r = self._sh('''
 gone=%s
-"$CBM_ORCA_BIN" terminal show --terminal "$gone" --json >/dev/null 2>&1
+"$PANE_ORCA_BIN" terminal show --terminal "$gone" --json >/dev/null 2>&1
 echo "cli=$?"
-cbm_alive_orca "$gone"; echo "alive=$?"
-cbm_alive_orca %s; echo "live=$?"
+pane_alive_orca "$gone"; echo "alive=$?"
+pane_alive_orca %s; echo "live=$?"
 ''' % (self.NEW, self.H))
         self.assertIn("cli=0", out, r.stderr)     # the CLI is perfectly happy
         self.assertIn("alive=1", out, r.stderr)   # we are not
@@ -1564,8 +1564,8 @@ for h in "; rm -rf /" "term_" "" "term_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8fg" \
          "term_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9 extra" \
          "term_0a1b2c3d4e5f60718293a4b5c6d7e8f9" \
          "--all" "$newline"; do
-  cbm_alive_orca "$h"; printf 'alive=%s ' "$?"
-  cbm_close_orca "$h"; printf 'close=%s\n' "$?"
+  pane_alive_orca "$h"; printf 'alive=%s ' "$?"
+  pane_close_orca "$h"; printf 'close=%s\n' "$?"
 done
 ''')
         self.assertEqual(out.splitlines(), ["alive=1 close=0"] * 10, r.stderr)
@@ -1574,8 +1574,8 @@ done
     def test_an_uppercase_handle_is_rejected(self):
         """Orca's handles are lowercase hex. Anything else is not a handle this
         tool created, and it is not going to be the first to find out."""
-        out, r = self._sh('cbm_orca_handle_ok %s; echo "lower=$?"\n'
-                          'cbm_orca_handle_ok %s; echo "upper=$?"'
+        out, r = self._sh('pane_orca_handle_ok %s; echo "lower=$?"\n'
+                          'pane_orca_handle_ok %s; echo "upper=$?"'
                           % (self.H, self.H.upper()))
         self.assertIn("lower=0", out, r.stderr)
         self.assertIn("upper=1", out, r.stderr)
@@ -1590,7 +1590,7 @@ done
         exactly that case. So a handle reporting connected:false is never passed
         to `terminal close` at all.
         """
-        out, r = self._sh('cbm_close_orca %s; echo "rc=$?"' % self.NEW)
+        out, r = self._sh('pane_close_orca %s; echo "rc=$?"' % self.NEW)
         self.assertIn("rc=0", out, r.stderr)
         self.assertEqual(self._verbs(), ["show"], self._log())
         self.assertNotIn("[terminal][close]", self._log(),
@@ -1605,9 +1605,9 @@ done
         the tab, so the record must be cleaned up on the strength of `show` alone.
         """
         out, r = self._sh(r'''
-f="$(cbm_state_dir)/retired.pane"
-cbm_state_write "$f" orca %s "$(cbm_plugin_root)" ""
-cbm_close_recorded_pane "$f"; echo "rc=$?"
+f="$(pane_state_dir)/retired.pane"
+pane_state_write "$f" orca %s "$(pane_plugin_root)" ""
+pane_close_recorded "$f"; echo "rc=$?"
 [ -f "$f" ] && echo "record=kept" || echo "record=gone"
 ''' % self.NEW)
         self.assertIn("rc=0", out, r.stderr)
@@ -1621,8 +1621,8 @@ cbm_close_recorded_pane "$f"; echo "rc=$?"
 
     def test_a_live_pane_is_closed(self):
         out, r = self._sh('''
-cbm_close_orca %s; echo "rc=$?"
-cbm_alive_orca %s; echo "after=$?"
+pane_close_orca %s; echo "rc=$?"
+pane_alive_orca %s; echo "after=$?"
 ''' % (self.H, self.H))
         self.assertIn("rc=0", out, r.stderr)
         self.assertIn("after=1", out, r.stderr)
@@ -1630,14 +1630,14 @@ cbm_alive_orca %s; echo "after=$?"
 
     def test_close_never_reaches_for_a_tab_or_everything(self):
         """`--tab` and `--worktree --all` close more than the monitor pane."""
-        out, r = self._sh('cbm_close_orca %s' % self.H)
+        out, r = self._sh('pane_close_orca %s' % self.H)
         for flag in ("[--tab]", "[--all]", "[--worktree]"):
             self.assertNotIn(flag, self._log())
 
     def test_close_is_best_effort(self):
         """A close the CLI refuses is reported as done: the caller re-checks
         liveness anyway, and a non-zero here would abort a teardown."""
-        out, r = self._sh('cbm_close_orca %s; echo "rc=$?"' % self.H,
+        out, r = self._sh('pane_close_orca %s; echo "rc=$?"' % self.H,
                           FAKE_CLOSE_FAILS="1")
         self.assertIn("rc=0", out, r.stderr)
         self.assertIn("[terminal][close]", self._log())
@@ -1646,8 +1646,8 @@ cbm_alive_orca %s; echo "after=$?"
 
     def test_open_pane_records_the_orca_backend(self):
         out, r = self._sh(r'''
-cbm_open_pane sess-1 /tmp/t.jsonl auto; echo "rc=$?"
-cat "$(cbm_state_dir)/sess-1.pane"
+pane_open sess-1 /tmp/t.jsonl auto; echo "rc=$?"
+cat "$(pane_state_dir)/sess-1.pane"
 ''', **self._in_orca())
         lines = out.splitlines()
         self.assertIn("rc=0", lines, r.stderr)
@@ -1662,12 +1662,12 @@ cat "$(cbm_state_dir)/sess-1.pane"
         containing a glob character expands against the pane's cwd. The path is
         the plugin's own install location — a marketplace cache or a checkout —
         so it is not under this tool's control. This drives the real
-        cbm_open_pane out of a copy of lib/ under a hostile directory name.
+        pane_open out of a copy of lib/ under a hostile directory name.
         """
         root = os.path.join(self.tmp, "plug in [v1]")
         shutil.copytree(os.path.abspath(LIB), os.path.join(root, "lib"))
         out, r = self._sh('. "%s/lib/common.sh"\n'
-                          'cbm_open_pane spacey /tmp/t.jsonl auto; echo "rc=$?"' % root,
+                          'pane_open spacey /tmp/t.jsonl auto; echo "rc=$?"' % root,
                           **self._in_orca())
         self.assertIn("rc=0", out, r.stderr)
         send = [l for l in self._log().splitlines()
@@ -1680,9 +1680,9 @@ cat "$(cbm_state_dir)/sess-1.pane"
         """SessionEnd is a fresh process: it closes via the RECORDED backend, and
         that close still goes through the liveness guard."""
         out, r = self._sh(r'''
-f="$(cbm_state_dir)/s.pane"
-printf 'orca\n%s\n%%s\n\n' "$(cbm_plugin_root)" > "$f"
-cbm_close_recorded_pane "$f"; echo "rc=$?"
+f="$(pane_state_dir)/s.pane"
+printf 'orca\n%s\n%%s\n\n' "$(pane_plugin_root)" > "$f"
+pane_close_recorded "$f"; echo "rc=$?"
 [ -f "$f" ] && echo "record=kept" || echo "record=gone"
 ''' % self.H)
         self.assertIn("rc=0", out, r.stderr)
@@ -1697,9 +1697,9 @@ cbm_close_recorded_pane "$f"; echo "rc=$?"
         """One retry is allowed at teardown, and it must not become the bug: each
         attempt re-checks `connected` before naming a handle to `close`."""
         out, r = self._sh(r'''
-f="$(cbm_state_dir)/s.pane"
-printf 'orca\n%s\n%%s\n\n' "$(cbm_plugin_root)" > "$f"
-cbm_close_recorded_pane "$f"; echo "rc=$?"
+f="$(pane_state_dir)/s.pane"
+printf 'orca\n%s\n%%s\n\n' "$(pane_plugin_root)" > "$f"
+pane_close_recorded "$f"; echo "rc=$?"
 [ -f "$f" ] && echo "record=kept" || echo "record=LOST"
 ''' % self.H, FAKE_CLOSE_STICKS="1")
         self.assertIn("rc=1", out, r.stderr)
@@ -1714,8 +1714,8 @@ cbm_close_recorded_pane "$f"; echo "rc=$?"
 
     def test_open_pane_records_nothing_when_the_pane_cannot_run(self):
         out, r = self._sh(r'''
-cbm_open_pane sess-2 /tmp/t.jsonl auto; echo "rc=$?"
-[ -f "$(cbm_state_dir)/sess-2.pane" ] && echo "state=WRITTEN" || echo "state=none"
+pane_open sess-2 /tmp/t.jsonl auto; echo "rc=$?"
+[ -f "$(pane_state_dir)/sess-2.pane" ] && echo "state=WRITTEN" || echo "state=none"
 ''', **self._in_orca(FAKE_SEND_FAILS="1"))
         self.assertIn("rc=1", out, r.stderr)
         self.assertIn("state=none", out, r.stderr)
@@ -1738,7 +1738,7 @@ class TestAgentSessionsGetNoPane(Base):
         return path
 
     def _is_agent(self, path):
-        script = ('. "%s/common.sh"\ncbm_is_agent_session %s && echo YES || echo NO'
+        script = ('. "%s/common.sh"\npane_is_agent_session %s && echo YES || echo NO'
                   % (os.path.abspath(LIB), "'" + path + "'"))
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                            env=dict(os.environ,
@@ -1812,20 +1812,20 @@ class TestAgentSessionsGetNoPane(Base):
                 shutil.copytree(os.path.join(src, sub), os.path.join(sandbox, sub))
             with open(os.path.join(sandbox, "lib", "common.sh"), "a") as f:
                 f.write("\n# ---- test backend: never touches a real terminal ----\n"
-                        "cbm_backend()     { printf iterm; }\n"
-                        "cbm_dispatch_ok() { return 0; }\n"
-                        "cbm_open_iterm()  { printf 'HANDLE-FAKE'; }\n"
-                        "cbm_alive_iterm() { return 1; }\n"
-                        "cbm_close_iterm() { return 0; }\n"
-                        "cbm_pane_alive()  { return 1; }\n"
-                        "cbm_pane_close()  { return 0; }\n")
+                        "pane_backend()     { printf iterm; }\n"
+                        "pane_dispatch_ok() { return 0; }\n"
+                        "pane_open_iterm()  { printf 'HANDLE-FAKE'; }\n"
+                        "pane_alive_iterm() { return 1; }\n"
+                        "pane_close_iterm() { return 0; }\n"
+                        "pane_alive()  { return 1; }\n"
+                        "pane_close()  { return 0; }\n")
         payload = json.dumps({"session_id": sid, "transcript_path": transcript,
                               "source": "startup", "cwd": "/x"})
         state = os.path.join(self.tmp, "state")
         subprocess.run(["bash", os.path.join(sandbox, "bin", "open-pane.sh")],
                        input=payload, capture_output=True, text=True,
                        env=dict(os.environ, XDG_STATE_HOME=state))
-        panes = os.path.join(state, "ccusage-backpack-monitor")
+        panes = os.path.join(state, "pane")
         if not os.path.isdir(panes):
             return []
         return sorted(f for f in os.listdir(panes) if f.endswith(".pane"))
@@ -1839,7 +1839,7 @@ class TestAgentSessionsGetNoPane(Base):
         sid = "abc12345-0000-0000-0000-000000000000"
         p = self._transcript(sid, [{"type": "user", "cwd": "/x"}])
         self._hook(sid, p)
-        state = os.path.join(self.tmp, "state", "ccusage-backpack-monitor")
+        state = os.path.join(self.tmp, "state", "pane")
         with open(os.path.join(state, sid + ".pane")) as f:
             self.assertIn("HANDLE-FAKE", f.read(),
                           "the hook used a REAL backend, not the test double")
@@ -1956,19 +1956,19 @@ class TestAccount(Base):
     def test_email_and_org_are_withheld_by_default(self):
         """This pane gets screen-shared; identity is opt-in."""
         a = self._acct(limits=[])
-        os.environ.pop("CBM_ACCOUNT", None)
+        os.environ.pop("PANE_ACCOUNT", None)
         ident = a.identity()
         self.assertEqual(ident["name"], "Testy")
         self.assertEqual(ident["email"], "")
         self.assertEqual(ident["org"], "")
         self.assertEqual(ident["plan"], "Max 5x")
         try:
-            os.environ["CBM_ACCOUNT"] = "full"
+            os.environ["PANE_ACCOUNT"] = "full"
             ident = a.identity()
             self.assertEqual(ident["email"], "testy@example.com")
             self.assertEqual(ident["org"], "Testy's Org")
         finally:
-            os.environ.pop("CBM_ACCOUNT", None)
+            os.environ.pop("PANE_ACCOUNT", None)
 
     def test_severity_from_server_outranks_the_percentage(self):
         import account
@@ -2024,7 +2024,7 @@ class TestTabs(Base):
 
     def _run(self, sid, path, tab="", env=None):
         e = dict(os.environ)
-        e["CBM_NO_NETWORK"] = "1"
+        e["PANE_NO_NETWORK"] = "1"
         e.update(env or {})
         return subprocess.run(
             [sys.executable, os.path.join(LIB, "render.py"), sid, path, str(tab)],
@@ -2125,7 +2125,7 @@ class TestTabs(Base):
 
     def test_tabs_off_restores_the_static_panel(self):
         sid, path = self._session()
-        r = self._run(sid, path, "3", {"CBM_TABS": "0"})
+        r = self._run(sid, path, "3", {"PANE_TABS": "0"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("MODELS", r.stdout)          # forced back to the live view
         self.assertNotIn("live limits", r.stdout)  # no strip
@@ -2156,14 +2156,14 @@ class TestTabs(Base):
         r = self._run(sid, path, "account", {"COLUMNS": "60"})
         self.assertIn("Testy", r.stdout)
         self.assertNotIn("testy@example.com", r.stdout)
-        r = self._run(sid, path, "account", {"COLUMNS": "60", "CBM_ACCOUNT": "full"})
+        r = self._run(sid, path, "account", {"COLUMNS": "60", "PANE_ACCOUNT": "full"})
         self.assertIn("testy@example.com", r.stdout)
 
     def test_account_off_hides_it_everywhere(self):
         sid, path = self._session()
         self.write_account(limits=[])
         for tab in self.TABS:
-            r = self._run(sid, path, tab, {"CBM_ACCOUNT": "0", "COLUMNS": "60"})
+            r = self._run(sid, path, tab, {"PANE_ACCOUNT": "0", "COLUMNS": "60"})
             self.assertNotIn("Testy", r.stdout, tab)
 
     def test_session_identity_reaches_the_panel(self):
@@ -2245,7 +2245,7 @@ class TestPaneRetires(Base):
             with open(os.path.join(d, "%s.json" % pid), "w") as fh:
                 json.dump(entry, fh)
         e = dict(os.environ)
-        e.update({"HOME": home, "CBM_NO_NETWORK": "1", "CBM_RETIRE_CHECK": "1",
+        e.update({"HOME": home, "PANE_NO_NETWORK": "1", "PANE_RETIRE_CHECK": "1",
                   "XDG_STATE_HOME": os.path.join(self.tmp, "state"),
                   "XDG_CONFIG_HOME": os.path.join(self.tmp, "config")})
         watch = os.path.abspath(os.path.join(HERE, "..", "bin", "watch.sh"))
@@ -2278,7 +2278,7 @@ class TestWatchKeys(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="cbm-keys-")
+        self.tmp = tempfile.mkdtemp(prefix="pane-keys-")
         self.home = os.path.join(self.tmp, "home")
         self.projects = os.path.join(self.home, ".claude", "projects", "proj")
         os.makedirs(self.projects, exist_ok=True)
@@ -2298,7 +2298,7 @@ class TestWatchKeys(unittest.TestCase):
     def _env(self):
         e = dict(os.environ)
         e.update({"HOME": self.home, "COLUMNS": "500", "LINES": "200",
-                  "CBM_NO_NETWORK": "1", "TERM": "xterm-256color",
+                  "PANE_NO_NETWORK": "1", "TERM": "xterm-256color",
                   "XDG_STATE_HOME": os.path.join(self.tmp, "state"),
                   "XDG_CONFIG_HOME": os.path.join(self.tmp, "config")})
         return e
@@ -2519,7 +2519,7 @@ class TestWatchKeys(unittest.TestCase):
         exactly one ghost copy survives every redraw. The scrollback wipe has to
         come last.
         """
-        out = self._drive([b"\033[C"], env={"CBM_ALTSCREEN": "0"})
+        out = self._drive([b"\033[C"], env={"PANE_ALTSCREEN": "0"})
         self.assertNotIn("\033[?1049h", out)
         self.assertIn("\033[3J", out, "left the ghost frame in scrollback")
         self.assertGreater(out.rfind("\033[3J"), out.rfind("\033[2J"),

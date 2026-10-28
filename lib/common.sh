@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# Shared helpers for ccusage-backpack-monitor.
+# Shared helpers for pane.
 # Sourced (by bash) from bin/open-pane.sh, bin/close-pane.sh, bin/open-now.sh,
 # and bin/watch.sh.
 #
 # Terminal support is pluggable. Each "backend" (herdr, iterm, orca, tmux,
-# wezterm) implements four operations as plain functions named cbm_<op>_<backend>:
-#     cbm_detect_<be>   -> 0 if this terminal is active
-#     cbm_open_<be>     <cmd> <split>  -> prints an opaque pane handle on stdout
-#     cbm_alive_<be>    <handle>       -> 0 if that pane is still open
-#     cbm_close_<be>    <handle>       -> close that pane (best-effort)
-# A cached cbm_backend() resolves the active backend in priority order, and the
-# public verbs (cbm_open_pane / cbm_pane_alive / cbm_pane_close) dispatch to it.
-# Adding kitty/Ghostty later = four functions + one word in cbm_backend's loop.
+# wezterm) implements four operations as plain functions named pane_<op>_<backend>:
+#     pane_detect_<be>   -> 0 if this terminal is active
+#     pane_open_<be>     <cmd> <split>  -> prints an opaque pane handle on stdout
+#     pane_alive_<be>    <handle>       -> 0 if that pane is still open
+#     pane_close_<be>    <handle>       -> close that pane (best-effort)
+# A cached pane_backend() resolves the active backend in priority order, and the
+# public verbs (pane_open / pane_alive / pane_close) dispatch to it.
+# Adding kitty/Ghostty later = four functions + one word in pane_backend's loop.
 
 # ---------------------------------------------------------------------------
 # OS + environment helpers
 # ---------------------------------------------------------------------------
 
 # True on macOS. Used to tailor install hints (brew vs npm) and PATH.
-cbm_is_macos() { [ "$(uname -s 2>/dev/null)" = "Darwin" ]; }
+pane_is_macos() { [ "$(uname -s 2>/dev/null)" = "Darwin" ]; }
 
 # Resolve how to invoke ccusage. Prints a command string that may contain
 # spaces (e.g. the npx fallback), so callers should run it via `eval`.
-cbm_ccusage() {
+pane_ccusage() {
   if command -v ccusage >/dev/null 2>&1; then printf 'ccusage'; return 0; fi
   local d
   for d in /opt/homebrew/bin /usr/local/bin "$HOME/.bun/bin" "$HOME/.deno/bin" "$HOME/.local/bin" "$HOME/.npm-global/bin"; do
@@ -41,7 +41,7 @@ cbm_ccusage() {
 # Locate python3, which is what the panel actually needs. Prefer an absolute
 # path so a broken pyenv/asdf shim on PATH can't take the pane down; fall back
 # to PATH resolution for hosts where python lives elsewhere (Linux, nix).
-cbm_python() {
+pane_python() {
   local d
   for d in /usr/bin /opt/homebrew/bin /usr/local/bin /usr/local/opt/python/libexec/bin; do
     if [ -x "$d/python3" ]; then printf '%s/python3' "$d"; return 0; fi
@@ -54,9 +54,9 @@ cbm_python() {
 # Centralized here so the in-pane watcher and the SessionStart hook surface the
 # SAME fix. OS-aware, since Linux is supported via tmux/WezTerm.
 # $1 = "plain" (default, multi-line for the pane) or "oneline" (for hook output).
-cbm_no_source_msg() {
+pane_no_source_msg() {
   local install hint
-  if cbm_is_macos; then
+  if pane_is_macos; then
     install='brew install python3'
     hint='macOS also ships one with the Xcode Command Line Tools:
       xcode-select --install'
@@ -65,11 +65,11 @@ cbm_no_source_msg() {
     hint='Any python3 on PATH works — no pip packages are needed.'
   fi
   if [ "$1" = "oneline" ]; then
-    printf 'ccusage-backpack-monitor: no python3 found (and no ccusage to fall back on). Install it with: %s' "$install"
+    printf 'pane: no python3 found (and no ccusage to fall back on). Install it with: %s' "$install"
     return
   fi
   cat <<MSG
-ccusage-backpack-monitor
+pane
 
   The panel reads Claude Code's own transcripts, so all it needs is python3 —
   but none was found, and neither was ccusage as a fallback.
@@ -80,24 +80,24 @@ ccusage-backpack-monitor
 
   $hint
 
-  Then start a fresh claude, or run  /ccusage-backpack-monitor:ccusage-monitor
+  Then start a fresh claude, or run  /pane:toggle
 MSG
 }
 
 # Ensure common bin dirs are on PATH. Needed because the terminal execs the
 # watcher with a bare, non-login shell that lacks Homebrew/npm paths. Covers
 # both macOS (Homebrew) and Linux (npm-global / local) install locations.
-cbm_fix_path() {
+pane_fix_path() {
   export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/opt/local/bin:$HOME/.bun/bin:$HOME/.deno/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/node_modules/.bin:/Applications/WezTerm.app/Contents/MacOS:$PATH"
 }
 
 # Directory for tiny pane-state files. MUST be identical across contexts:
-# the SessionStart/SessionEnd hooks and the /ccusage-monitor command all read it.
+# the SessionStart/SessionEnd hooks and the /pane:toggle command all read it.
 # We deliberately do NOT use $CLAUDE_PLUGIN_DATA — it's set in hook context but
 # not in slash-command (!-bash) context, which would split the open and close
 # sides into different dirs so the close hook couldn't find the command's pane.
-cbm_state_dir() {
-  local d="${XDG_STATE_HOME:-$HOME/.local/state}/ccusage-backpack-monitor"
+pane_state_dir() {
+  local d="${XDG_STATE_HOME:-$HOME/.local/state}/pane"
   mkdir -p "$d" 2>/dev/null
   printf '%s' "$d"
 }
@@ -111,24 +111,24 @@ cbm_state_dir() {
 # fixed resolver, a resumed session — orphans the old pane and the next open
 # leaves the user with two. A pane following one of this session's *agents*
 # counts as this session's too.
-cbm_session_panes() {  # $1=sid
+pane_session_list() {  # $1=sid
   local state f sid be h root tr t8
-  state="$(cbm_state_dir)"
+  state="$(pane_state_dir)"
   t8="$(printf '%s' "$1" | cut -c1-8)"
   for f in "$state"/*.pane; do
     [ -e "$f" ] || continue
     sid="$(basename "$f" .pane)"
-    be="$(cbm_state_backend "$f")"
-    h="$(cbm_state_handle "$f")"
-    root="$(cbm_state_root "$f")"
+    be="$(pane_state_backend "$f")"
+    h="$(pane_state_handle "$f")"
+    root="$(pane_state_root "$f")"
     # Checked before anything else, including the liveness prune: a pane owned
     # by another running session is not ours to close, to reopen, or to forget
     # the state file of. This is the backstop for a session id resolved wrongly
     # -- which has happened, and cost somebody else their monitor.
-    if cbm_pane_is_foreign "$f"; then
+    if pane_is_foreign "$f"; then
       continue
     fi
-    if [ -z "$h" ] || ! cbm_pane_alive "$h" "$be"; then
+    if [ -z "$h" ] || ! pane_alive "$h" "$be"; then
       rm -f "$f"                        # self-healing: drop dead entries
       continue
     fi
@@ -149,20 +149,20 @@ cbm_session_panes() {  # $1=sid
 #   1 could not open        5 belongs to another live session -> left alone
 # Panes belonging to OTHER sessions are never touched — several Claude sessions
 # commonly run side by side, each with its own monitor.
-cbm_toggle_pane() {  # $1=sid  $2=trans
+pane_toggle() {  # $1=sid  $2=trans
   local sid="$1" trans="$2"
   [ -z "$sid" ] && return 1
 
   local state cur panes count clean psid pbe ph proot
-  state="$(cbm_state_dir)"
-  cur="$(cbm_plugin_root)"
+  state="$(pane_state_dir)"
+  cur="$(pane_plugin_root)"
 
   # This session id resolved to somebody else's live Claude process. Their pane
   # is not ours to close, and a pane we opened for their session would report
   # their spend as ours. Both are worse than doing nothing.
-  cbm_pane_is_foreign "$state/$sid.pane" && return 5
+  pane_is_foreign "$state/$sid.pane" && return 5
 
-  panes="$(cbm_session_panes "$sid")"
+  panes="$(pane_session_list "$sid")"
 
   if [ -n "$panes" ]; then
     count=0
@@ -170,7 +170,7 @@ cbm_toggle_pane() {  # $1=sid  $2=trans
     while IFS="$(printf '\t')" read -r psid pbe ph proot; do
       [ -n "$ph" ] || continue
       count=$((count + 1))
-      cbm_pane_close "$ph" "$pbe" 2>/dev/null
+      pane_close "$ph" "$pbe" 2>/dev/null
       rm -f "$state/$psid.pane"
       # Anything not on the current version, or keyed under a different id, means
       # the user wants a working monitor rather than no monitor.
@@ -181,11 +181,11 @@ EOF
     if [ "$count" -eq 1 ] && [ "$clean" -eq 1 ]; then
       return 3                          # a single current pane -> close it
     fi
-    cbm_open_pane "$sid" "$trans" || return 1
+    pane_open "$sid" "$trans" || return 1
     return 4                            # stale and/or duplicates -> fresh one
   fi
 
-  cbm_open_pane "$sid" "$trans" || return 1
+  pane_open "$sid" "$trans" || return 1
   return 0
 }
 
@@ -199,23 +199,23 @@ EOF
 # slash commands frequently run with a stripped PATH that lacks Homebrew, so a
 # `command -v` probe would spuriously report "unsupported" for a terminal we're
 # clearly inside. Whether the CLI is actually runnable is handled at open time
-# (cbm_fix_path first, then a graceful return 1 if the split command fails).
+# (pane_fix_path first, then a graceful return 1 if the split command fails).
 # Vars are read with ${VAR:-} so the detectors are safe even under `set -u`.
-# $TMUX disqualifies herdr and orca alike: see cbm_backend for why either app's
+# $TMUX disqualifies herdr and orca alike: see pane_backend for why either app's
 # variables can be a ghost inherited by a tmux server started from one of its panes.
-cbm_detect_herdr()   { [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] && [ -z "${TMUX:-}" ]; }
-cbm_detect_tmux()    { [ -n "${TMUX:-}" ]; }
-cbm_detect_orca()    { [ "${TERM_PROGRAM:-}" = Orca ] && [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && [ -z "${TMUX:-}" ]; }
-cbm_detect_wezterm() { [ -n "${WEZTERM_PANE:-}" ] || [ "${TERM_PROGRAM:-}" = "WezTerm" ]; }
-cbm_detect_iterm()   { [ "${TERM_PROGRAM:-}" = "iTerm.app" ] || [ -n "${ITERM_SESSION_ID:-}" ]; }
+pane_detect_herdr()   { [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] && [ -z "${TMUX:-}" ]; }
+pane_detect_tmux()    { [ -n "${TMUX:-}" ]; }
+pane_detect_orca()    { [ "${TERM_PROGRAM:-}" = Orca ] && [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && [ -z "${TMUX:-}" ]; }
+pane_detect_wezterm() { [ -n "${WEZTERM_PANE:-}" ] || [ "${TERM_PROGRAM:-}" = "WezTerm" ]; }
+pane_detect_iterm()   { [ "${TERM_PROGRAM:-}" = "iTerm.app" ] || [ -n "${ITERM_SESSION_ID:-}" ]; }
 
 # Back-compat alias: older call sites / external scripts may still ask this.
-cbm_is_iterm() { cbm_detect_iterm; }
+pane_is_iterm() { pane_detect_iterm; }
 
 # Resolve the active backend, in priority order. Detection is deterministic
 # within a process and cheap (a couple of `command -v` + env checks), so the
-# few callers that re-resolve via $(cbm_backend) simply re-run it; the hot path
-# (cbm_open_pane) resolves once into a local and threads it through explicitly.
+# few callers that re-resolve via $(pane_backend) simply re-run it; the hot path
+# (pane_open) resolves once into a local and threads it through explicitly.
 # The rule is the same at every rank: whatever owns the layout of the pane Claude
 # runs in gets to do the splitting, because the GUI terminal around it must not
 # be split.
@@ -228,7 +228,7 @@ cbm_is_iterm() { cbm_detect_iterm; }
 #   split there would live outside the multiplexer's pane tree (alive/close,
 #   which speak tmux, could never reconcile it).
 #
-# But $TMUX beats the herdr vars, which is why cbm_detect_herdr checks for it.
+# But $TMUX beats the herdr vars, which is why pane_detect_herdr checks for it.
 # When both are set, the tmux pane is where Claude actually is — either tmux is
 # running inside a herdr pane, or the herdr vars are a GHOST: they are ordinary
 # environment variables, inherited by anything a herdr pane starts and never
@@ -238,8 +238,8 @@ cbm_is_iterm() { cbm_detect_iterm; }
 # the monitor in an unrelated pane, or in no pane at all.
 #
 # The nesting this gets wrong is herdr running INSIDE tmux, where tmux would win
-# and the herdr pane would go unsplit; CBM_BACKEND=herdr forces it. A pre-set
-# CBM_BACKEND env var forces any backend (handy for tests / overrides); it is
+# and the herdr pane would go unsplit; PANE_BACKEND=herdr forces it. A pre-set
+# PANE_BACKEND env var forces any backend (handy for tests / overrides); it is
 # assigned, never exported, so a child with a different env re-resolves.
 #
 #   orca ranks BELOW herdr and tmux for exactly the reason above: Orca is a GUI
@@ -247,27 +247,27 @@ cbm_is_iterm() { cbm_detect_iterm; }
 #   layout and must do the splitting — an Orca split around them would sit
 #   outside their pane tree. $ORCA_TERMINAL_HANDLE leaks into a tmux server first
 #   started from an Orca pane the same way the herdr vars do (it is an ordinary
-#   inherited variable, never refreshed), so cbm_detect_orca carries the same
+#   inherited variable, never refreshed), so pane_detect_orca carries the same
 #   $TMUX disqualifier. It ranks above wezterm/iterm only in the sense of coming
 #   first in this list: inside Orca, $TERM_PROGRAM is Orca, so neither of those
 #   detectors would match anyway.
-cbm_backend() {
-  if [ -n "${CBM_BACKEND:-}" ]; then printf '%s' "$CBM_BACKEND"; return 0; fi
+pane_backend() {
+  if [ -n "${PANE_BACKEND:-}" ]; then printf '%s' "$PANE_BACKEND"; return 0; fi
   local b
   for b in herdr tmux orca wezterm iterm; do
-    if "cbm_detect_$b"; then CBM_BACKEND="$b"; printf '%s' "$b"; return 0; fi
+    if "pane_detect_$b"; then PANE_BACKEND="$b"; printf '%s' "$b"; return 0; fi
   done
   return 1
 }
 
-# Is any supported terminal active? Replaces cbm_is_iterm at the hook gates.
-cbm_is_supported() { cbm_backend >/dev/null 2>&1; }
+# Is any supported terminal active? Replaces pane_is_iterm at the hook gates.
+pane_is_supported() { pane_backend >/dev/null 2>&1; }
 
-# Guard: only dispatch to a cbm_<op>_<backend> that actually exists, so a corrupt
+# Guard: only dispatch to a pane_<op>_<backend> that actually exists, so a corrupt
 # or future-version state tag fails safe (no-op) rather than invoking an
 # arbitrary function name.
-cbm_dispatch_ok() {  # $1=op (open|alive|close)  $2=backend
-  command -v "cbm_${1}_$2" >/dev/null 2>&1
+pane_dispatch_ok() {  # $1=op (open|alive|close)  $2=backend
+  command -v "pane_${1}_$2" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -277,9 +277,9 @@ cbm_dispatch_ok() {  # $1=op (open|alive|close)  $2=backend
 # must close via the RECORDED backend, never by re-detecting. Pre-0.6 files were
 # a single line (a bare iTerm session id) — those are read as backend=iterm.
 # ---------------------------------------------------------------------------
-cbm_state_write() {  # $1=path $2=backend $3=handle [$4=plugin root] [$5=owner pid]
-  printf '%s\n%s\n%s\n%s\n' "$2" "$3" "${4:-$(cbm_plugin_root)}" \
-    "${5-$(cbm_owner_pid)}" > "$1"
+pane_state_write() {  # $1=path $2=backend $3=handle [$4=plugin root] [$5=owner pid]
+  printf '%s\n%s\n%s\n%s\n' "$2" "$3" "${4:-$(pane_plugin_root)}" \
+    "${5-$(pane_owner_pid)}" > "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -294,7 +294,7 @@ cbm_state_write() {  # $1=path $2=backend $3=handle [$4=plugin root] [$5=owner p
 # Claude Code keeps ~/.claude/sessions/<pid>.json for every live session, which
 # makes the answer exact: walk our own ancestry to the claude process that
 # spawned us and read its id. Absent (older Claude Code), callers fall back to
-# the heuristics as before -- but with cbm_pane_is_foreign still standing over
+# the heuristics as before -- but with pane_is_foreign still standing over
 # them, so a wrong guess can cost a pane of ours and never one of somebody
 # else's.
 # ---------------------------------------------------------------------------
@@ -303,7 +303,7 @@ cbm_state_write() {  # $1=path $2=backend $3=handle [$4=plugin root] [$5=owner p
 # The file outlives the process it describes, so liveness is checked too: a pid
 # whose number has since been recycled must never be mistaken for the session
 # that used to hold it.
-cbm_session_of_pid() {  # $1=pid -> session id | empty
+pane_session_of_pid() {  # $1=pid -> session id | empty
   local pid="$1" f
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   f="$HOME/.claude/sessions/$pid.json"
@@ -313,15 +313,15 @@ cbm_session_of_pid() {  # $1=pid -> session id | empty
     *claude*) ;;
     *) return 1 ;;                      # recycled pid wearing a dead session's file
   esac
-  cbm_json_field sessionId < "$f"
+  pane_json_field sessionId < "$f"
 }
 
 # The pid of the Claude Code process we are running under, walking up from here.
-cbm_owner_pid() {
+pane_owner_pid() {
   local pid=$$ depth=0
   while [ "$depth" -lt 12 ]; do
     case "$pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
-    if cbm_session_of_pid "$pid" >/dev/null 2>&1; then printf '%s' "$pid"; return 0; fi
+    if pane_session_of_pid "$pid" >/dev/null 2>&1; then printf '%s' "$pid"; return 0; fi
     pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
     depth=$((depth + 1))
   done
@@ -329,22 +329,22 @@ cbm_owner_pid() {
 }
 
 # The session id of the Claude Code process we are running under.
-cbm_owner_sid() {
+pane_owner_sid() {
   local pid
-  pid="$(cbm_owner_pid)" || return 1
-  cbm_session_of_pid "$pid"
+  pid="$(pane_owner_pid)" || return 1
+  pane_session_of_pid "$pid"
 }
 
 # True when this pane belongs to a DIFFERENT session that is still running.
 # Such a pane is untouchable: somebody is watching it, and it is not us. A pane
 # whose owner has exited is an orphan and may be cleaned up, and a pane written
 # before owners were recorded is unknowable -- neither is anyone else's to lose.
-cbm_pane_is_foreign() {  # $1=state file
+pane_is_foreign() {  # $1=state file
   local owner mine
-  owner="$(cbm_state_owner "$1")"
+  owner="$(pane_state_owner "$1")"
   [ -n "$owner" ] || return 1
-  cbm_session_of_pid "$owner" >/dev/null 2>&1 || return 1
-  mine="$(cbm_owner_pid 2>/dev/null)"
+  pane_session_of_pid "$owner" >/dev/null 2>&1 || return 1
+  mine="$(pane_owner_pid 2>/dev/null)"
   [ -n "$mine" ] && [ "$mine" = "$owner" ] && return 1
   return 0
 }
@@ -352,27 +352,27 @@ cbm_pane_is_foreign() {  # $1=state file
 # Absolute path of the plugin directory that owns this common.sh. Under the
 # marketplace cache this path contains the version, so comparing it to the
 # recorded one tells us whether a running pane predates an upgrade.
-cbm_plugin_root() {
+pane_plugin_root() {
   (cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)
 }
 
 # Version string for user-facing messages. Read from plugin.json without needing
 # python or jq, so it works in the same stripped environments the hooks run in.
-cbm_plugin_version() {
+pane_plugin_version() {
   sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-    "$(cbm_plugin_root)/.claude-plugin/plugin.json" 2>/dev/null | head -1
+    "$(pane_plugin_root)/.claude-plugin/plugin.json" 2>/dev/null | head -1
 }
 
 # Third line of the state file: the plugin root the pane was launched from.
 # Empty for state files written before v0.9.0, which we treat as "unknown" and
 # therefore stale, so the first toggle after upgrading refreshes the pane.
-cbm_state_root() {  # $1=path -> plugin root or empty
+pane_state_root() {  # $1=path -> plugin root or empty
   sed -n 3p "$1" 2>/dev/null
 }
-cbm_state_owner() {  # $1=path -> pid of the Claude session that opened it
+pane_state_owner() {  # $1=path -> pid of the Claude session that opened it
   sed -n 4p "$1" 2>/dev/null
 }
-cbm_state_backend() {  # $1=path -> backend id (legacy single-line => iterm)
+pane_state_backend() {  # $1=path -> backend id (legacy single-line => iterm)
   local first second
   first="$(sed -n 1p "$1" 2>/dev/null)"
   second="$(sed -n 2p "$1" 2>/dev/null)"
@@ -381,7 +381,7 @@ cbm_state_backend() {  # $1=path -> backend id (legacy single-line => iterm)
   esac
   printf 'iterm'
 }
-cbm_state_handle() {  # $1=path -> opaque handle
+pane_state_handle() {  # $1=path -> opaque handle
   local first second
   first="$(sed -n 1p "$1" 2>/dev/null)"
   second="$(sed -n 2p "$1" 2>/dev/null)"
@@ -397,62 +397,62 @@ cbm_state_handle() {  # $1=path -> opaque handle
 
 # Is pane <handle> still open? Backend defaults to the current one but callers
 # (the idempotency check, close-pane.sh) pass the RECORDED backend explicitly.
-cbm_pane_alive() {  # $1=handle  $2=backend(optional)
+pane_alive() {  # $1=handle  $2=backend(optional)
   [ -n "$1" ] || return 1
-  local be="${2:-$(cbm_backend)}"
+  local be="${2:-$(pane_backend)}"
   [ -n "$be" ] || return 1
-  cbm_dispatch_ok alive "$be" || return 1
-  "cbm_alive_$be" "$1"
+  pane_dispatch_ok alive "$be" || return 1
+  "pane_alive_$be" "$1"
 }
 
 # Close pane <handle> via <backend>. Best-effort: unknown backend / vanished CLI
 # is a silent no-op (the per-backend impls also swallow errors).
-cbm_pane_close() {  # $1=handle  $2=backend(optional)
+pane_close() {  # $1=handle  $2=backend(optional)
   [ -n "$1" ] || return 0
-  local be="${2:-$(cbm_backend)}"
+  local be="${2:-$(pane_backend)}"
   [ -n "$be" ] || return 0
-  cbm_dispatch_ok close "$be" || return 0
-  "cbm_close_$be" "$1"
+  pane_dispatch_ok close "$be" || return 0
+  "pane_close_$be" "$1"
 }
 
 # Open the monitor pane for session <sid> (transcript <trans>, may be empty) and
 # stash a backend-tagged state file. Idempotent. Shared by the SessionStart hook
-# and the /ccusage-monitor command. Returns: 0 opened, 2 already open, 1 not
+# and the /pane:toggle command. Returns: 0 opened, 2 already open, 1 not
 # opened — so callers need no extra liveness queries to report the outcome.
 #
 # $3 is 'auto' when the SessionStart hook opened it and 'manual' (the default,
 # used by the toggle command) when the user asked for it by name. Only an auto
 # pane is allowed to close itself on discovering it follows an agent.
-cbm_open_pane() {  # $1=sid  $2=trans  $3=auto|manual
+pane_open() {  # $1=sid  $2=trans  $3=auto|manual
   local sid="$1" trans="$2"
   [ -z "$sid" ] && return 1
 
   local backend
-  backend="$(cbm_backend)" || return 1            # no supported terminal -> 1
-  cbm_dispatch_ok open "$backend" || return 1
+  backend="$(pane_backend)" || return 1            # no supported terminal -> 1
+  pane_dispatch_ok open "$backend" || return 1
 
   local libdir watcher state
   libdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   watcher="$libdir/../bin/watch.sh"
-  state="$(cbm_state_dir)"
+  state="$(pane_state_dir)"
 
   # Self-pruning: drop stale state files orphaned by crashes/reboots (>1 day).
   # Never a live session's, however old the file: forgetting a pane somebody is
   # watching leaves them a monitor they can no longer toggle off.
   find "$state" -name '*.pane' -mtime +1 2>/dev/null | while IFS= read -r old; do
-    cbm_pane_is_foreign "$old" || rm -f "$old"
+    pane_is_foreign "$old" || rm -f "$old"
   done
 
   # Idempotency: if a live pane already exists for this session, don't reopen.
   # Check the RECORDED backend's handle, not the ambient one.
   local prev="$state/$sid.pane" pb ph
   if [ -f "$prev" ]; then
-    pb="$(cbm_state_backend "$prev")"
-    ph="$(cbm_state_handle "$prev")"
-    if [ -n "$ph" ] && cbm_pane_alive "$ph" "$pb"; then return 2; fi
+    pb="$(pane_state_backend "$prev")"
+    ph="$(pane_state_handle "$prev")"
+    if [ -n "$ph" ] && pane_alive "$ph" "$pb"; then return 2; fi
   fi
 
-  local poll="${CBM_POLL:-3}" split="${CBM_SPLIT:-vertically}" size="${CBM_SIZE:-25}"
+  local poll="${PANE_POLL:-3}" split="${PANE_SPLIT:-vertically}" size="${PANE_SIZE:-25}"
   case "$poll" in ''|*[!0-9]*) poll=3 ;; esac
   [ "$poll" -lt 1 ] && poll=1
   case "$split" in vertically|horizontally) ;; *) split=vertically ;; esac
@@ -465,7 +465,7 @@ cbm_open_pane() {  # $1=sid  $2=trans  $3=auto|manual
   [ "$size" -gt 90 ] && size=90
 
   # Build the watcher invocation as a self-contained shell program: each arg is
-  # single-quoted (cbm_shq) so a hostile sid/transcript can't break out. Each
+  # single-quoted (pane_shq) so a hostile sid/transcript can't break out. Each
   # backend then runs this string through exactly ONE more parse layer (sh -c,
   # or iTerm's shell) — never re-interpreting the user data in its own language.
   # The absolute watcher path is baked in so the new pane finds it regardless
@@ -478,15 +478,15 @@ cbm_open_pane() {  # $1=sid  $2=trans  $3=auto|manual
   # the plugin's own location, which under a marketplace cache or a local
   # checkout can contain spaces or glob characters — unquoted, those either split
   # the exec line into a wrong command or expand against the pane's cwd.
-  cmd="$(cbm_shq "$watcher") $(cbm_shq "$sid") $(cbm_shq "$trans") $(cbm_shq "$poll") $(cbm_shq "$mode")"
+  cmd="$(pane_shq "$watcher") $(pane_shq "$sid") $(pane_shq "$trans") $(pane_shq "$poll") $(pane_shq "$mode")"
   # $4 is the session id, for backends that can label the pane they create (herdr
   # shows it in its sidebar). The others take three args and ignore it.
-  handle="$("cbm_open_$backend" "$cmd" "$split" "$size" "$sid")" || return 1
+  handle="$("pane_open_$backend" "$cmd" "$split" "$size" "$sid")" || return 1
   [ -z "$handle" ] && return 1
   # If we can't record the pane, close it again rather than leaking an orphan
   # that SessionEnd (which keys off the state file) could never find.
-  if ! cbm_state_write "$prev" "$backend" "$handle"; then   # overwrites any stale file
-    "cbm_close_$backend" "$handle" 2>/dev/null
+  if ! pane_state_write "$prev" "$backend" "$handle"; then   # overwrites any stale file
+    "pane_close_$backend" "$handle" 2>/dev/null
     return 1
   fi
   return 0
@@ -510,7 +510,7 @@ cbm_open_pane() {  # $1=sid  $2=trans  $3=auto|manual
 # Where the herdr CLI lives. herdr injects $HERDR_BIN_PATH into every pane it
 # manages, which is the only reliable answer inside a hook (stripped PATH); a
 # bare `herdr` covers anyone who unsets it and has it on PATH anyway.
-cbm_herdr_bin() { printf '%s' "${HERDR_BIN_PATH:-herdr}"; }
+pane_herdr_bin() { printf '%s' "${HERDR_BIN_PATH:-herdr}"; }
 
 # A herdr pane id is "w<id>:p<id>". Handles come off disk, so every entry point
 # validates the shape before passing one to the CLI as an argument — a corrupt
@@ -526,7 +526,7 @@ cbm_herdr_bin() { printf '%s' "${HERDR_BIN_PATH:-herdr}"; }
 #
 # Written with `case`, not a bash regex: common.sh is also sourced by a plain
 # /bin/sh in places, and a hard parse error there would take the whole file down.
-cbm_herdr_pane_ok() {  # $1=handle
+pane_herdr_ok() {  # $1=handle
   local h="${1:-}" ws pane
   case "$h" in w*:p*) ;; *) return 1 ;; esac
   ws="${h%%:*}";  ws="${ws#w}"      # the workspace id, between `w` and the ':'
@@ -541,26 +541,26 @@ cbm_herdr_pane_ok() {  # $1=handle
 # (neither is guaranteed in hook context). Cut on , { } so each key lands on its
 # own line, then read the first pane_id — the same shape as the WezTerm alive
 # check.
-cbm_herdr_pane_id() {  # $1=json -> pane id or empty
+pane_herdr_id() {  # $1=json -> pane id or empty
   printf '%s' "$1" | tr ',{}' '\n\n\n' \
     | sed -n 's/.*"pane_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
-cbm_open_herdr() {  # $1=cmd  $2=split  $3=size%  $4=sid  -> prints wN:pN
+pane_open_herdr() {  # $1=cmd  $2=split  $3=size%  $4=sid  -> prints wN:pN
   local cmd="$1" dir=right pct="${3:-25}" sid="${4:-}" bin ratio json id
   [ "$2" = horizontally ] && dir=down
   # Split from OUR pane, never the focused one: the monitor belongs beside the
   # session that asked for it, and the user may be looking elsewhere.
-  cbm_herdr_pane_ok "${HERDR_PANE_ID:-}" || return 1
-  bin="$(cbm_herdr_bin)"
+  pane_herdr_ok "${HERDR_PANE_ID:-}" || return 1
+  bin="$(pane_herdr_bin)"
   case "$pct" in ''|*[!0-9]*) pct=25 ;; esac
   # --ratio is the share kept by the ORIGINAL pane, not the size of the new one:
   # measured, `--ratio 0.25` left this pane 18 of 70 columns and handed the new
-  # pane 52. CBM_SIZE is the share the MONITOR takes, so pass the complement —
+  # pane 52. PANE_SIZE is the share the MONITOR takes, so pass the complement —
   # 25% monitor => --ratio 0.75 (measured back as 22 of 89 columns for the new
   # pane). Two decimals is exact for an integer percentage.
   #
-  # 10# forces base 10. Without it `CBM_SIZE=08` is an octal literal: bash errors
+  # 10# forces base 10. Without it `PANE_SIZE=08` is an octal literal: bash errors
   # on the hook's stderr and the arithmetic yields nothing, leaving `--ratio 0.`
   # — which herdr ACCEPTS, as 0.0, collapsing the session's own pane. (`025`
   # would quietly mean 21%.) The digits-only `case` above is what makes 10# safe.
@@ -574,16 +574,16 @@ cbm_open_herdr() {  # $1=cmd  $2=split  $3=size%  $4=sid  -> prints wN:pN
   # default even split rather than not at all.
   if json="$("$bin" pane split --pane "$HERDR_PANE_ID" --direction "$dir" \
                     --ratio "$ratio" --no-focus 2>/dev/null)"; then
-    id="$(cbm_herdr_pane_id "$json")"
+    id="$(pane_herdr_id "$json")"
   else
     json="$("$bin" pane split --pane "$HERDR_PANE_ID" --direction "$dir" \
                    --no-focus 2>/dev/null)" || return 1
-    id="$(cbm_herdr_pane_id "$json")"
+    id="$(pane_herdr_id "$json")"
   fi
   # A split reported success but we cannot read a pane id out of it: the JSON
   # shape has changed under us. There is nothing we could name to close, so stop
   # rather than guess — a wrong id here would close somebody else's pane.
-  cbm_herdr_pane_ok "$id" || return 1
+  pane_herdr_ok "$id" || return 1
   # The command is TYPED into the pane's interactive login shell — herdr offers
   # no argv form on split — so it lands in the user's shell history, and an rc
   # that consumes stdin before printing a prompt would eat it. `exec` replaces
@@ -600,18 +600,18 @@ cbm_open_herdr() {  # $1=cmd  $2=split  $3=size%  $4=sid  -> prints wN:pN
   # Best-effort label for herdr's sidebar, so the pane says what it is and which
   # session it follows. Never worth failing an open that already succeeded.
   if [ -n "$sid" ]; then
-    "$bin" pane rename "$id" "ccusage $(printf '%s' "$sid" | cut -c1-8)" \
+    "$bin" pane rename "$id" "pane $(printf '%s' "$sid" | cut -c1-8)" \
       >/dev/null 2>&1 || true
   fi
   printf '%s\n' "$id"
 }
-cbm_alive_herdr() {  # $1=handle
-  cbm_herdr_pane_ok "${1:-}" || return 1
-  "$(cbm_herdr_bin)" pane get "$1" >/dev/null 2>&1
+pane_alive_herdr() {  # $1=handle
+  pane_herdr_ok "${1:-}" || return 1
+  "$(pane_herdr_bin)" pane get "$1" >/dev/null 2>&1
 }
-cbm_close_herdr() {  # $1=handle
-  cbm_herdr_pane_ok "${1:-}" || return 0
-  "$(cbm_herdr_bin)" pane close "$1" >/dev/null 2>&1 || true
+pane_close_herdr() {  # $1=handle
+  pane_herdr_ok "${1:-}" || return 0
+  "$(pane_herdr_bin)" pane close "$1" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -625,13 +625,13 @@ cbm_close_herdr() {  # $1=handle
 # 1.4.199; three of its behaviours shape this backend:
 #
 #   * The split is ALWAYS 50/50. There is no size, ratio or percent flag, so
-#     CBM_SIZE cannot be honoured here (accepted and ignored; documented).
+#     PANE_SIZE cannot be honoured here (accepted and ignored; documented).
 #   * `split --command` is unreliable: it worked once and then failed three times
 #     out of three with "Timed out waiting for split pane handle" after a 10s
 #     hang, creating no pane. So the split is BARE and the watcher is typed in
 #     afterwards with `terminal send`.
 #   * `terminal show` exits 0 for a pane that is closed, so liveness is the
-#     "connected" field, never the exit status. See cbm_close_orca for why that
+#     "connected" field, never the exit status. See pane_close_orca for why that
 #     distinction is load-bearing rather than cosmetic.
 #
 # The pane is never renamed or labelled: `terminal rename` retitles the enclosing
@@ -642,9 +642,9 @@ cbm_close_herdr() {  # $1=handle
 # copy can be broken: /usr/local/bin/orca is a dangling symlink on at least one
 # install, and it fails loudly ("Unable to determine Orca.app path from symlink")
 # rather than silently, which would take every pane operation down with it.
-# $CBM_ORCA_BIN overrides both, for a non-standard install (and for the tests).
-cbm_orca_bin() {
-  if [ -n "${CBM_ORCA_BIN:-}" ]; then printf '%s' "$CBM_ORCA_BIN"; return 0; fi
+# $PANE_ORCA_BIN overrides both, for a non-standard install (and for the tests).
+pane_orca_bin() {
+  if [ -n "${PANE_ORCA_BIN:-}" ]; then printf '%s' "$PANE_ORCA_BIN"; return 0; fi
   if [ -x /Applications/Orca.app/Contents/Resources/bin/orca ]; then
     printf '%s' /Applications/Orca.app/Contents/Resources/bin/orca; return 0
   fi
@@ -661,7 +661,7 @@ cbm_orca_bin() {
 # every group is enforced and the match is anchored at both ends. Written with
 # `case`, not a bash regex: common.sh is also sourced by a plain /bin/sh in
 # places, where a regex would be a hard parse error taking the whole file down.
-cbm_orca_handle_ok() {  # $1=handle
+pane_orca_handle_ok() {  # $1=handle
   local h="${1:-}" x='[0-9a-f]' x4 x8 x12
   x4="$x$x$x$x"; x8="$x4$x4"; x12="$x8$x4"
   case "$h" in
@@ -675,18 +675,18 @@ cbm_orca_handle_ok() {  # $1=handle
 # line, so a plain sed would do — but the `tr` first means a compact
 # {"handle":"term_..."} body parses identically, which is what the WezTerm and
 # herdr readers already do.
-cbm_orca_json_field() {  # $1=key  (JSON on stdin) -> first value or empty
+pane_orca_json_field() {  # $1=key  (JSON on stdin) -> first value or empty
   tr ',{}' '\n\n\n' \
     | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
-cbm_open_orca() {  # $1=cmd  $2=split  $3=size% (ignored)  -> prints term_<uuid>
+pane_open_orca() {  # $1=cmd  $2=split  $3=size% (ignored)  -> prints term_<uuid>
   local cmd="$1" dir=vertical bin json id
   [ "$2" = horizontally ] && dir=horizontal
   # Split from OUR pane, never the focused one: the monitor belongs beside the
   # session that asked for it, and the user may be looking elsewhere.
-  cbm_orca_handle_ok "${ORCA_TERMINAL_HANDLE:-}" || return 1
-  bin="$(cbm_orca_bin)"
+  pane_orca_handle_ok "${ORCA_TERMINAL_HANDLE:-}" || return 1
+  bin="$(pane_orca_bin)"
   # No --command (see the header): a bare split is the only reliable one. No size
   # flag exists, so $3 is accepted and ignored — Orca always splits 50/50.
   # The exit status is taken from the split ITSELF, not from a pipeline ending in
@@ -694,13 +694,13 @@ cbm_open_orca() {  # $1=cmd  $2=split  $3=size% (ignored)  -> prints term_<uuid>
   # from a pane that exists but whose handle we could not read.
   json="$("$bin" terminal split --terminal "$ORCA_TERMINAL_HANDLE" \
                  --direction "$dir" --json 2>/dev/null)" || return 1
-  id="$(printf '%s' "$json" | cbm_orca_json_field handle)"
+  id="$(printf '%s' "$json" | pane_orca_json_field handle)"
   # A split that reported success has already put a pane on screen, so there is
   # no retry here: a second attempt would leave two panes with nothing pointing
   # at either. If the handle is unreadable we cannot name what we just created,
   # so we cannot close it either — stop rather than guess, because a wrong handle
   # passed to `terminal close` closes somebody else's pane (again, see below).
-  cbm_orca_handle_ok "$id" || return 1
+  pane_orca_handle_ok "$id" || return 1
   # And it must not be OUR OWN handle. Today the first "handle" in a split answer
   # is the new leaf's, but if that shape ever drifts — or an error path echoes the
   # parent back — the `send` below would exec the watcher over the pane running
@@ -723,31 +723,31 @@ cbm_open_orca() {  # $1=cmd  $2=split  $3=size% (ignored)  -> prints term_<uuid>
        >/dev/null 2>&1; then
     # A split we cannot drive is an empty pane the user has to shut by hand, and
     # no state file would ever point at it.
-    cbm_close_orca "$id"
+    pane_close_orca "$id"
     return 1
   fi
   # The new pane steals focus (Orca has no --no-focus), so hand it back. Measured
   # on 1.4.199: `terminal focus --terminal <parent>` re-activates the original
   # LEAF, not merely the tab, so the user keeps typing into Claude. Still
   # best-effort — never worth failing an open that already succeeded — and it
-  # only ever names the pane Claude itself is in. CBM_ORCA_REFOCUS=0 skips the
+  # only ever names the pane Claude itself is in. PANE_ORCA_REFOCUS=0 skips the
   # call, which leaves the new monitor pane active.
-  if [ "${CBM_ORCA_REFOCUS:-1}" != 0 ]; then
+  if [ "${PANE_ORCA_REFOCUS:-1}" != 0 ]; then
     "$bin" terminal focus --terminal "$ORCA_TERMINAL_HANDLE" --json \
       >/dev/null 2>&1 || true
   fi
   printf '%s\n' "$id"
 }
-cbm_alive_orca() {  # $1=handle
-  cbm_orca_handle_ok "${1:-}" || return 1
+pane_alive_orca() {  # $1=handle
+  pane_orca_handle_ok "${1:-}" || return 1
   # The EXIT STATUS is not the answer: `terminal show` on a pane that has been
   # closed still returns ok:true and exit 0, reporting "connected": false and
   # "paneRuntimeId": -1. Only a bogus handle is an error. So read the field.
-  "$(cbm_orca_bin)" terminal show --terminal "$1" --json 2>/dev/null \
+  "$(pane_orca_bin)" terminal show --terminal "$1" --json 2>/dev/null \
     | grep -q '"connected": *true'
 }
-cbm_close_orca() {  # $1=handle
-  cbm_orca_handle_ok "${1:-}" || return 0
+pane_close_orca() {  # $1=handle
+  pane_orca_handle_ok "${1:-}" || return 0
   # *** The most important line in this backend. ***
   # Asking Orca 1.4.199 to close a handle whose pane has ALREADY left the tab
   # layout closes a DIFFERENT pane in the same tab. Measured twice, and both
@@ -755,8 +755,8 @@ cbm_close_orca() {  # $1=handle
   # created the split. A pane that closed a moment ago, or whose shell exited on
   # its own (which is how this monitor retires itself), is exactly that case.
   # So: already gone => do nothing at all. Never --tab, never --worktree --all.
-  cbm_alive_orca "$1" || return 0
-  "$(cbm_orca_bin)" terminal close --terminal "$1" --json >/dev/null 2>&1 || true
+  pane_alive_orca "$1" || return 0
+  "$(pane_orca_bin)" terminal close --terminal "$1" --json >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -764,7 +764,7 @@ cbm_close_orca() {  # $1=handle
 # ---------------------------------------------------------------------------
 # Split map preserves the iTerm semantics (vertically = side-by-side): tmux's -h
 # splits left/right, -v splits top/bottom (the classic tmux naming inversion).
-cbm_open_tmux() {  # $1=cmd  $2=split  $3=size%  -> prints %N
+pane_open_tmux() {  # $1=cmd  $2=split  $3=size%  -> prints %N
   local cmd="$1" dir=-h pct="${3:-25}" id
   [ "$2" = horizontally ] && dir=-v
   # Build argv so -t <pane> is only added when $TMUX_PANE is set. Everything
@@ -780,13 +780,13 @@ cbm_open_tmux() {  # $1=cmd  $2=split  $3=size%  -> prints %N
   fi
   tmux "$@" -- /bin/sh -c "$cmd" 2>/dev/null
 }
-cbm_alive_tmux() {  # $1=handle
+pane_alive_tmux() {  # $1=handle
   [ -n "$1" ] || return 1
   # -Fxq: whole-line, fixed-string, quiet — so %3 never matches %30 and a leading
   # % is literal.
   tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -Fxq "$1"
 }
-cbm_close_tmux() {  # $1=handle
+pane_close_tmux() {  # $1=handle
   [ -n "$1" ] || return 0
   tmux kill-pane -t "$1" 2>/dev/null || true
 }
@@ -794,10 +794,10 @@ cbm_close_tmux() {  # $1=handle
 # ---------------------------------------------------------------------------
 # Backend: WezTerm  (Linux + macOS). Handle = an integer pane id like 12.
 # ---------------------------------------------------------------------------
-cbm_open_wezterm() {  # $1=cmd  $2=split  $3=size%  -> prints <int>
-  # CBM_WEZTERM_PERCENT stays as an explicit per-backend override; unset, it
+pane_open_wezterm() {  # $1=cmd  $2=split  $3=size%  -> prints <int>
+  # PANE_WEZTERM_PERCENT stays as an explicit per-backend override; unset, it
   # inherits the unified size ($3, default 25).
-  local cmd="$1" dir=--right pct="${CBM_WEZTERM_PERCENT:-${3:-25}}"
+  local cmd="$1" dir=--right pct="${PANE_WEZTERM_PERCENT:-${3:-25}}"
   [ "$2" = horizontally ] && dir=--bottom
   case "$pct" in ''|*[!0-9]*) pct=25 ;; esac
   # Only pass --pane-id when WEZTERM_PANE is set (never emit --pane-id ''). The
@@ -807,7 +807,7 @@ cbm_open_wezterm() {  # $1=cmd  $2=split  $3=size%  -> prints <int>
   set -- "$@" -- /bin/sh -c "$cmd"
   wezterm "$@" 2>/dev/null
 }
-cbm_alive_wezterm() {  # $1=handle
+pane_alive_wezterm() {  # $1=handle
   [ -n "$1" ] || return 1
   case "$1" in ''|*[!0-9]*) return 1 ;; esac   # handle must be a bare integer
   # (so a corrupt state file can't inject regex metacharacters below).
@@ -819,7 +819,7 @@ cbm_alive_wezterm() {  # $1=handle
     | tr ',{}' '\n\n\n' \
     | grep -Eq "\"pane_id\"[[:space:]]*:[[:space:]]*$1([^0-9]|\$)"
 }
-cbm_close_wezterm() {  # $1=handle
+pane_close_wezterm() {  # $1=handle
   [ -n "$1" ] || return 0
   wezterm cli kill-pane --pane-id "$1" 2>/dev/null || true
 }
@@ -827,9 +827,9 @@ cbm_close_wezterm() {  # $1=handle
 # ---------------------------------------------------------------------------
 # Backend: iTerm2  (macOS). Handle = an iTerm session id. The alive/close
 # AppleScript is unchanged from the original single-terminal implementation; only
-# open now resizes the new pane (see cbm_open_iterm) to honor CBM_SIZE.
+# open now resizes the new pane (see pane_open_iterm) to honor PANE_SIZE.
 # ---------------------------------------------------------------------------
-cbm_open_iterm() {  # $1=cmd  $2=split  $3=size%  -> prints iTerm session id
+pane_open_iterm() {  # $1=cmd  $2=split  $3=size%  -> prints iTerm session id
   # Single-quote each arg for the shell, then escape the whole string for the
   # AppleScript double-quoted literal (\ and ").
   local osa_cmd pct="${3:-25}" dim=columns
@@ -854,7 +854,7 @@ tell application "iTerm2"
 end tell
 OSA
 }
-cbm_alive_iterm() {  # $1=handle
+pane_alive_iterm() {  # $1=handle
   [ -n "$1" ] || return 1
   local r
   r="$(/usr/bin/osascript 2>/dev/null <<OSA
@@ -872,7 +872,7 @@ OSA
 )"
   [ "$r" = "1" ]
 }
-cbm_close_iterm() {  # $1=handle
+pane_close_iterm() {  # $1=handle
   [ -n "$1" ] || return 0
   /usr/bin/osascript >/dev/null 2>&1 <<OSA
 tell application "iTerm2"
@@ -907,7 +907,7 @@ OSA
 # Returns 0 (an agent) ONLY when it can actually tell. A brand-new human session
 # has an empty transcript at SessionStart too, so "can't tell yet" must mean
 # "not an agent" — the opposite default would stop the pane ever opening.
-cbm_is_agent_session() {  # $1=transcript path
+pane_is_agent_session() {  # $1=transcript path
   local t="$1"
   case "$t" in
     */subagents/*) return 0 ;;
@@ -918,11 +918,11 @@ cbm_is_agent_session() {  # $1=transcript path
 
 # Close the pane recorded for $1 and forget it. Shared by the SessionEnd hook and
 # by a watcher that has worked out it should never have been opened.
-cbm_close_own_pane() {  # $1=sid
+pane_close_own() {  # $1=sid
   local f
-  f="$(cbm_state_dir)/$1.pane"
+  f="$(pane_state_dir)/$1.pane"
   [ -f "$f" ] || return 0
-  cbm_close_recorded_pane "$f"
+  pane_close_recorded "$f"
 }
 
 # Close the pane a state file describes, and only then forget it.
@@ -933,22 +933,22 @@ cbm_close_own_pane() {  # $1=sid
 # and the user is left closing it by hand. Closing first, verifying, and
 # unlinking only once the pane is really gone makes a failed close a retry
 # instead of an orphan.
-cbm_close_recorded_pane() {  # $1=state file -> 0 when the pane is gone
+pane_close_recorded() {  # $1=state file -> 0 when the pane is gone
   local f="$1" backend handle
   [ -f "$f" ] || return 0
-  backend="$(cbm_state_backend "$f")"
-  handle="$(cbm_state_handle "$f")"
+  backend="$(pane_state_backend "$f")"
+  handle="$(pane_state_handle "$f")"
   if [ -z "$handle" ]; then
     rm -f "$f"                          # nothing to close; the record is junk
     return 0
   fi
-  cbm_pane_close "$handle" "$backend"
+  pane_close "$handle" "$backend"
   # One retry: at session teardown the terminal can be mid-quit and refuse the
   # first attempt, which is precisely when nobody is left to try again.
-  if cbm_pane_alive "$handle" "$backend"; then
-    cbm_pane_close "$handle" "$backend"
+  if pane_alive "$handle" "$backend"; then
+    pane_close "$handle" "$backend"
   fi
-  if cbm_pane_alive "$handle" "$backend"; then
+  if pane_alive "$handle" "$backend"; then
     return 1                            # still there: keep the record for later
   fi
   rm -f "$f"
@@ -962,7 +962,7 @@ cbm_close_recorded_pane() {  # $1=state file -> 0 when the pane is gone
 # ~/.claude/sessions registry, and reading "no entry" as "ended" there would
 # retire every pane on the machine. Only an entry's ABSENCE FROM A REGISTRY
 # THAT IS OTHERWISE IN USE means the session is over.
-cbm_session_is_live() {  # $1=sid
+pane_session_is_live() {  # $1=sid
   local want="$1" dir found pid
   dir="$HOME/.claude/sessions"
   [ -d "$dir" ] || return 2
@@ -971,7 +971,7 @@ cbm_session_is_live() {  # $1=sid
            "$dir"/*.json 2>/dev/null | head -1)"
   [ -n "$found" ] || return 1
   pid="$(basename "$found" .json)"
-  cbm_session_of_pid "$pid" >/dev/null 2>&1 && return 0
+  pane_session_of_pid "$pid" >/dev/null 2>&1 && return 0
   return 1
 }
 
@@ -980,14 +980,14 @@ cbm_session_is_live() {  # $1=sid
 # info, so it prints a churning free-block table to stdout (exit 1), which would
 # make the signature differ on nearly every poll and re-render constantly. On
 # macOS `stat -c` is an invalid flag (empty, nonzero) so it falls through to -f.
-cbm_stat_sig() {  # $1=path
+pane_stat_sig() {  # $1=path
   stat -c '%Y-%s' "$1" 2>/dev/null && return   # GNU/Linux
   stat -f '%m-%z' "$1" 2>/dev/null && return   # BSD/macOS
   return 1
 }
 
 # Resolve a usable login/interactive shell. $SHELL if set, else bash, else sh.
-cbm_login_shell() {
+pane_login_shell() {
   if [ -n "$SHELL" ]; then printf '%s' "$SHELL"; return; fi
   command -v bash >/dev/null 2>&1 && { command -v bash; return; }
   printf '/bin/sh'
@@ -995,9 +995,9 @@ cbm_login_shell() {
 # Drop the pane into an interactive login shell (-il), matching the historical
 # behavior for bash/zsh/fish/ksh. Only POSIX sh/dash get -i, since they reject
 # -l and would otherwise kill the pane.
-cbm_exec_shell() {
+pane_exec_shell() {
   local sh
-  sh="$(cbm_login_shell)"
+  sh="$(pane_login_shell)"
   case "$(basename "$sh")" in
     sh|dash) exec "$sh" -i  ;;
     *)       exec "$sh" -il ;;
@@ -1007,16 +1007,16 @@ cbm_exec_shell() {
 # Read one top-level string field from hook JSON supplied on stdin.
 # Pure shell (no python3) so the hooks work even without python3 installed —
 # the rich panel still degrades to plain text in that case, as documented.
-cbm_json_field() {
+pane_json_field() {
   sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
 # Single-quote a string for safe use as one shell word.
-cbm_shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+pane_shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
 # Quote $1 as a JSON string literal (escapes backslash and double-quote). Our
 # messages are single-line, so this is sufficient for embedding in hook output.
-cbm_json_quote() {
+pane_json_quote() {
   local s=$1
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}

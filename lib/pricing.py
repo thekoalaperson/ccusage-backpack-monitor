@@ -1,11 +1,11 @@
-"""Model pricing for ccusage-backpack-monitor.
+"""Model pricing for pane.
 
 Why this exists: `ccusage --offline` prices from a snapshot baked in at release
 time, so any model newer than the installed ccusage silently costs $0.00. That
 is how Opus 5 and Sonnet 5 ended up showing $0 next to millions of tokens.
 
 Resolution order (first hit wins):
-  1. user overrides   ~/.config/ccusage-backpack-monitor/pricing.json
+  1. user overrides   ~/.config/pane/pricing.json
   2. refreshed cache  LiteLLM snapshot, refetched at most once a day
   3. bundled table    below — correct at release, no network needed
   4. family fallback  infer from the model name (opus/sonnet/haiku/fable)
@@ -80,7 +80,7 @@ REFRESH_TTL = 86400  # once a day is plenty; pricing changes rarely
 def _state_dir():
     d = os.path.join(os.environ.get("XDG_STATE_HOME",
                                     os.path.expanduser("~/.local/state")),
-                     "ccusage-backpack-monitor")
+                     "pane")
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -91,7 +91,7 @@ def _state_dir():
 def _config_dir():
     return os.path.join(os.environ.get("XDG_CONFIG_HOME",
                                        os.path.expanduser("~/.config")),
-                        "ccusage-backpack-monitor")
+                        "pane")
 
 
 def _load_json(path):
@@ -106,9 +106,9 @@ def _refresh_if_stale(path):
     """Refetch the LiteLLM snapshot at most once a day.
 
     Never raises and never blocks for long: a slow or absent network just
-    leaves the bundled table in charge. Set CBM_NO_NETWORK=1 to disable.
+    leaves the bundled table in charge. Set PANE_NO_NETWORK=1 to disable.
     """
-    if os.environ.get("CBM_NO_NETWORK") == "1":
+    if os.environ.get("PANE_NO_NETWORK") == "1":
         return
     try:
         if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < REFRESH_TTL:
